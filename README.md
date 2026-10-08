@@ -9,3 +9,4 @@
 - A memória-tároló egy mutex alatt számol kvótát és bérlőn belüli idempotencia-kulcsot, az idegen snapshot nem található, az illegális átmenetet a store utasítja el; a volume-zár kulcsa a `volume_id` lesz, nem a bérlő plusz a volume.
 - A storage a `StorageBackend` mögött van: a véletlen mock a beállított késleltetéssel és hibaaránnyal fut, a sikeres create ismétlése siker, a determinisztikus tesztek pedig scriptelt backendet használnak.
 - A worker FIFO sort futtat, a storage-hívás idejére tartja a globális N-es limitet, a volume-zárat a teljes retry-sorozatra (backoff közben is), és leállításkor a megszakított hívás után a snapshot `creating` vagy `deleting` állapotban marad.
+- SIGINT és SIGTERM után az üzleti útvonal 503, a `/healthz` 200 marad, új job nem indul, a futó storage-hívás a `SHUTDOWN_TIMEOUT`-ig befejezheti, a sorban hagyott snapshot `pending` marad, a határidő lejártával megszakított hívás pedig `creating` vagy `deleting` állapotot hagy.

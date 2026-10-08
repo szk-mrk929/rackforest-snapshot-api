@@ -1,46 +1,70 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
+
+	"rackforest-snapshot-api/src/app"
+	"rackforest-snapshot-api/src/backend"
 	"rackforest-snapshot-api/src/config"
 	"rackforest-snapshot-api/src/logger"
+	"rackforest-snapshot-api/src/store"
+	"rackforest-snapshot-api/src/worker"
 )
 
 func main() {
-	fmt.Printf("\n")
-
-	// Load configuration
 	conf, err := config.Load()
 	if err != nil {
-		slog.Error("Environment loading failed", "error", err)
+		slog.Error("environment loading failed", "error", err)
 		os.Exit(1)
 	}
 
-	// Initialize logger
 	log := logger.New(conf.LogLevel, os.Stdout)
 	slog.SetDefault(log)
 
-	// Validate environment variables
 	if err := conf.Validate(); err != nil {
-		log.WithGroup("main").Error("Environment validation failed", "error", err)
+		log.WithGroup("main").Error("environment validation failed", "error", err)
 		os.Exit(1)
 	}
 
-	// DEV:
-	log.WithGroup("main").Info("Service started", slog.AnyValue(conf).Any())
+	log.WithGroup("main").Info("service started", "config", conf)
 
-	// // Run service
-	// if err := run(conf, log); err != nil {
-	// 	log.WithGroup("main").Error("Service stopped", "error", err)
-	// 	os.Exit(1)
-	// }
-
-	// DEV:
-	fmt.Println("\nℹ️  Hello, World!")
+	if err := run(conf, log); err != nil {
+		log.WithGroup("main").Error("service stopped", "error", err)
+		os.Exit(1)
+	}
+	log.WithGroup("main").Info("service stopped")
 }
 
-// func run(conf config.Config, log *slog.Logger) error {
-// 	return nil
-// }
+func run(conf config.Config, log *slog.Logger) error {
+	st := store.NewMemory()
+	be := backend.NewMock(backend.MockConfig{
+		MinDelay:  conf.StorageMinDelay,
+		MaxDelay:  conf.StorageMaxDelay,
+		ErrorRate: conf.StorageErrorRate,
+	})
+	jobs, err := worker.New(worker.Config{
+		WorkerCount:     conf.WorkerCount,
+		WorkerAttempts:  conf.WorkerAttempts,
+		WorkerQueueSize: conf.WorkerQueueSize,
+		StorageTimeout:  conf.StorageTimeout,
+		RetryBaseDelay:  conf.RetryBaseDelay,
+	}, st, be, log)
+	if err != nil {
+		return err
+	}
+
+	application, err := app.New(conf, log, jobs)
+	if err != nil {
+		return err
+	}
+
+	// SIGINT and SIGTERM cancel this context. Run then drains on its own
+	// budget, ShutdownTimeout, instead of the already-canceled signal context.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return application.Run(ctx)
+}
