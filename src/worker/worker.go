@@ -21,6 +21,7 @@ import (
 	"rackforest-snapshot-api/src/domain"
 	"rackforest-snapshot-api/src/logger"
 	"rackforest-snapshot-api/src/store"
+	"rackforest-snapshot-api/src/utils/ctxutil"
 )
 
 const (
@@ -118,7 +119,7 @@ func New(cfg Config, st store.Store, be backend.StorageBackend, log *slog.Logger
 		backend: be,
 		log:     log.WithGroup("worker"),
 		now:     func() time.Time { return time.Now().UTC() },
-		sleep:   sleepContext,
+		sleep:   ctxutil.Sleep,
 		sem:     make(chan struct{}, cfg.WorkerCount),
 		active:  make(map[string]struct{}),
 		busy:    make(map[string]struct{}),
@@ -570,20 +571,6 @@ func backoffDelay(base time.Duration, failedAttempt int) time.Duration {
 		delay *= 2
 	}
 	return delay
-}
-
-func sleepContext(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 var (

@@ -8,3 +8,4 @@
 - A napló minden sorára a contextből másolja a kérésazonosítót; a kliens `X-Request-ID`-ja csak biztonságos karakterekkel marad meg, különben a szerver generál, és ugyanezt az azonosítót viszi tovább a worker.
 - A memória-tároló egy mutex alatt számol kvótát és bérlőn belüli idempotencia-kulcsot, az idegen snapshot nem található, az illegális átmenetet a store utasítja el; a volume-zár kulcsa a `volume_id` lesz, nem a bérlő plusz a volume.
 - A storage a `StorageBackend` mögött van: a véletlen mock a beállított késleltetéssel és hibaaránnyal fut, a sikeres create ismétlése siker, a determinisztikus tesztek pedig scriptelt backendet használnak.
+- A worker FIFO sort futtat, a storage-hívás idejére tartja a globális N-es limitet, a volume-zárat a teljes retry-sorozatra (backoff közben is), és leállításkor a megszakított hívás után a snapshot `creating` vagy `deleting` állapotban marad.

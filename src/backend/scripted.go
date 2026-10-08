@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"rackforest-snapshot-api/src/utils/ctxutil"
 )
 
 // Scripted is a StorageBackend whose delay, failures, and blocking are set by tests.
@@ -129,7 +131,7 @@ func (s *Scripted) call(ctx context.Context, volumeID string, create bool) error
 		s.mu.Unlock()
 	}()
 
-	if err := wait(ctx, delay); err != nil {
+	if err := ctxutil.Sleep(ctx, delay); err != nil {
 		return err
 	}
 	if gate != nil {

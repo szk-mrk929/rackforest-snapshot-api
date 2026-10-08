@@ -6,7 +6,6 @@ package backend
 import (
 	"context"
 	"errors"
-	"time"
 )
 
 var (
@@ -23,21 +22,4 @@ var (
 type StorageBackend interface {
 	CreateSnapshot(ctx context.Context, volumeID, snapshotID string) error
 	DeleteSnapshot(ctx context.Context, volumeID, snapshotID string) error
-}
-
-func wait(ctx context.Context, d time.Duration) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if d <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }

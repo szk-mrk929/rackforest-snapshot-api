@@ -5,6 +5,8 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	"rackforest-snapshot-api/src/utils/ctxutil"
 )
 
 type objectKey struct {
@@ -51,7 +53,7 @@ func NewMock(cfg MockConfig) *Mock {
 
 // CreateSnapshot implements StorageBackend.
 func (m *Mock) CreateSnapshot(ctx context.Context, volumeID, snapshotID string) error {
-	if err := wait(ctx, m.nextDelay()); err != nil {
+	if err := ctxutil.Sleep(ctx, m.nextDelay()); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -74,7 +76,7 @@ func (m *Mock) CreateSnapshot(ctx context.Context, volumeID, snapshotID string) 
 // A missing snapshot is not an error: a failed create may never have landed.
 // The error rate can still fail the call, which is a transient storage error.
 func (m *Mock) DeleteSnapshot(ctx context.Context, volumeID, snapshotID string) error {
-	if err := wait(ctx, m.nextDelay()); err != nil {
+	if err := ctxutil.Sleep(ctx, m.nextDelay()); err != nil {
 		return err
 	}
 	m.mu.Lock()
