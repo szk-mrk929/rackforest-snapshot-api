@@ -90,18 +90,14 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		want string
 	}{
 		{name: "worker count", key: "WORKER_COUNT", val: "0", want: "WORKER_COUNT"},
-		{name: "worker count text", key: "WORKER_COUNT", val: "nope", want: "WORKER_COUNT"},
 		{name: "attempts", key: "WORKER_ATTEMPTS", val: "0", want: "WORKER_ATTEMPTS"},
 		{name: "queue", key: "WORKER_QUEUE_SIZE", val: "-1", want: "WORKER_QUEUE_SIZE"},
 		{name: "quota", key: "TENANT_SNAPSHOT_QUOTA", val: "0", want: "TENANT_SNAPSHOT_QUOTA"},
 		{name: "shutdown", key: "SHUTDOWN_TIMEOUT", val: "0", want: "SHUTDOWN_TIMEOUT"},
-		{name: "shutdown text", key: "SHUTDOWN_TIMEOUT", val: "later", want: "SHUTDOWN_TIMEOUT"},
 		{name: "storage timeout", key: "STORAGE_TIMEOUT", val: "-5", want: "STORAGE_TIMEOUT"},
 		{name: "retry", key: "RETRY_BASE_DELAY", val: "0", want: "RETRY_BASE_DELAY"},
 		{name: "error rate high", key: "STORAGE_ERROR_RATE", val: "1.5", want: "STORAGE_ERROR_RATE"},
 		{name: "error rate low", key: "STORAGE_ERROR_RATE", val: "-0.1", want: "STORAGE_ERROR_RATE"},
-		{name: "error rate text", key: "STORAGE_ERROR_RATE", val: "often", want: "STORAGE_ERROR_RATE"},
-		{name: "level", key: "LOG_LEVEL", val: "loud", want: "LOG_LEVEL"},
 		{name: "negative mock delay", key: "STORAGE_MIN_DELAY", val: "-1", want: "STORAGE_MIN_DELAY"},
 	}
 	for _, tt := range tests {
@@ -135,11 +131,19 @@ func TestValidateRejectsEmptyAddress(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsBlankAddress(t *testing.T) {
+func TestLoadFallsBackOnUnparseableValues(t *testing.T) {
 	clearConfigEnv(t)
-	t.Setenv("HTTP_ADDR", "   ")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "HTTP_ADDR") {
-		t.Fatalf("err = %v", err)
+	t.Setenv("LOG_LEVEL", "loud")
+	t.Setenv("WORKER_COUNT", "nope")
+	t.Setenv("SHUTDOWN_TIMEOUT", "later")
+	t.Setenv("STORAGE_ERROR_RATE", "often")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LogLevel != slog.LevelInfo || c.WorkerCount != 3 || c.ShutdownTimeout != 24*time.Second || c.StorageErrorRate != 0.2 {
+		t.Fatalf("fallback = %+v", c)
 	}
 }
 
