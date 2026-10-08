@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: snapshot
+      POSTGRES_PASSWORD: snapshot
+      POSTGRES_DB: snapshot
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snapshot -d snapshot"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+    environment:
+      HTTP_ADDR: ":3000"
+      STORE_DRIVER: postgres
+      DATABASE_URL: postgres://snapshot:snapshot@postgres:5432/snapshot?sslmode=disable
+      STORAGE_MIN_DELAY: "0"
+      STORAGE_MAX_DELAY: "0"
+      STORAGE_ERROR_RATE: "0"
+      LOG_LEVEL: info
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    environment:
+      SNAPSHOT_TEST_DATABASE_URL: postgres://snapshot:snapshot@postgres:5432/snapshot?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy

@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=./configuration-schema.json
+# oapi-codegen v2.4.1 configuration.
+# The stdlib router is enough; chi or echo would not change the contract.
+package: api
+output: ./src/api/models.gen.go
+generate:
+  models: true
+  client: true
+  embedded-spec: true
+  std-http-server: true
+output-options:
+  skip-prune: true
+  name-normalizer: ToCamelCase

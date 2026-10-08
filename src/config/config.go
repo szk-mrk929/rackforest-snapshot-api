@@ -3,8 +3,10 @@ package config
 import (
 	"fmt"
 	"log/slog"
-	envUtils "rackforest-snapshot-api/src/utils"
+	"math"
 	"time"
+
+	envUtils "rackforest-snapshot-api/src/utils"
 )
 
 type Config struct {
@@ -21,6 +23,20 @@ type Config struct {
 	WorkerCount     int // Maximum number of concurrent worker operations
 	WorkerAttempts  int // Maximum number of attempts to create or delete a snapshot
 	WorkerQueueSize int // Maximum number of snapshots to queue for processing
+
+	// Tenant quota and storage-call policy
+	TenantSnapshotQuota int           // Non-deleted snapshots allowed per tenant
+	StorageTimeout      time.Duration // Deadline of one storage call
+	RetryBaseDelay      time.Duration // Base delay of the exponential backoff
+
+	// Random storage mock
+	StorageMinDelay  time.Duration // Lower bound of the mock delay
+	StorageMaxDelay  time.Duration // Upper bound of the mock delay
+	StorageErrorRate float64       // Mock failure probability, from 0 to 1
+
+	// Persistence. memory is the default. postgres needs DatabaseURL.
+	StoreDriver string
+	DatabaseURL string
 }
 
 func Load() (Config, error) {
@@ -35,9 +51,22 @@ func Load() (Config, error) {
 		ShutdownTimeout: envUtils.Duration("SHUTDOWN_TIMEOUT", 24*time.Second),
 
 		// Worker configuration
-		WorkerCount:     envUtils.Int("WORKER_COUNT", 3),        // Maximum number of concurrent workers
-		WorkerAttempts:  envUtils.Int("WORKER_ATTEMPTS", 3),     // Maximum number of attempts to create or delete a snapshot
-		WorkerQueueSize: envUtils.Int("WORKER_QUEUE_SIZE", 128), // Maximum number of snapshots to queue for processing
+		WorkerCount:     envUtils.Int("WORKER_COUNT", 3),
+		WorkerAttempts:  envUtils.Int("WORKER_ATTEMPTS", 3),
+		WorkerQueueSize: envUtils.Int("WORKER_QUEUE_SIZE", 128),
+
+		// Tenant quota and storage-call policy
+		TenantSnapshotQuota: envUtils.Int("TENANT_SNAPSHOT_QUOTA", 10),
+		StorageTimeout:      envUtils.Duration("STORAGE_TIMEOUT", 30*time.Second),
+		RetryBaseDelay:      envUtils.Duration("RETRY_BASE_DELAY", 200*time.Millisecond),
+
+		// Random storage mock
+		StorageMinDelay:  envUtils.Duration("STORAGE_MIN_DELAY", 2*time.Second),
+		StorageMaxDelay:  envUtils.Duration("STORAGE_MAX_DELAY", 10*time.Second),
+		StorageErrorRate: envUtils.Float64("STORAGE_ERROR_RATE", 0.2),
+
+		StoreDriver: envUtils.String("STORE_DRIVER", "memory"),
+		DatabaseURL: envUtils.String("DATABASE_URL", ""),
 	}
 
 	if err := c.Validate(); err != nil {
@@ -62,6 +91,30 @@ func (c Config) Validate() error {
 	}
 	if c.WorkerQueueSize < 1 {
 		return fmt.Errorf("WORKER_QUEUE_SIZE must be at least 1, or more (%d)", c.WorkerQueueSize)
+	}
+	if c.TenantSnapshotQuota < 1 {
+		return fmt.Errorf("TENANT_SNAPSHOT_QUOTA must be at least 1, or more (%d)", c.TenantSnapshotQuota)
+	}
+	if c.StorageTimeout <= 0 {
+		return fmt.Errorf("STORAGE_TIMEOUT must be greater than 0 (%s)", c.StorageTimeout)
+	}
+	if c.RetryBaseDelay <= 0 {
+		return fmt.Errorf("RETRY_BASE_DELAY must be greater than 0 (%s)", c.RetryBaseDelay)
+	}
+	if c.StorageMinDelay < 0 || c.StorageMaxDelay < c.StorageMinDelay {
+		return fmt.Errorf("STORAGE_MIN_DELAY must be >= 0 and <= STORAGE_MAX_DELAY (%s, %s)", c.StorageMinDelay, c.StorageMaxDelay)
+	}
+	if math.IsNaN(c.StorageErrorRate) || c.StorageErrorRate < 0 || c.StorageErrorRate > 1 {
+		return fmt.Errorf("STORAGE_ERROR_RATE must be between 0 and 1 (%v)", c.StorageErrorRate)
+	}
+	switch c.StoreDriver {
+	case "memory":
+	case "postgres":
+		if c.DatabaseURL == "" {
+			return fmt.Errorf("DATABASE_URL is required when STORE_DRIVER=postgres")
+		}
+	default:
+		return fmt.Errorf("STORE_DRIVER must be memory or postgres (%s)", c.StoreDriver)
 	}
 
 	return nil

@@ -94,22 +94,6 @@ func parseEnvLine(line string) (string, string, bool) {
 	return key, parseEnvValue(val), true
 }
 
-func inferValue(val string) any {
-	if n, err := strconv.Atoi(val); err == nil {
-		return n
-	}
-	if n, err := strconv.ParseFloat(val, 64); err == nil {
-		return n
-	}
-	if d, err := time.ParseDuration(val); err == nil {
-		return d
-	}
-	if b, err := strconv.ParseBool(val); err == nil {
-		return b
-	}
-	return val
-}
-
 func parseEnvValue(val string) string {
 	val = strings.TrimSpace(val)
 	if len(val) >= 2 {
@@ -121,10 +105,6 @@ func parseEnvValue(val string) string {
 	if i := strings.Index(val, " #"); i >= 0 {
 		val = strings.TrimSpace(val[:i])
 	}
-
-	// typed := inferValue(val)
-	// fmt.Printf("parsed value %s %v (%T -> %s)\n", val, typed, typed, reflect.TypeOf(typed).String())
-	// return fmt.Sprintf("%v", typed)
 	return val
 }
 

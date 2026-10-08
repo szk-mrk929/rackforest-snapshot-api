@@ -1,0 +1,297 @@
+openapi: 3.0.3
+info:
+  title: RackForest Snapshot API
+  version: 1.0.0
+  description: |
+    Asynchronous snapshots of virtual-machine volumes.
+
+    The create and delete calls return as soon as the snapshot is admitted.
+    A worker talks to the storage plane in the background. Every route except
+    GET /healthz and GET /metrics requires the X-Tenant-ID header. A tenant
+    only sees its own snapshots and may hold at most ten that are not deleted.
+servers:
+  - url: /
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      responses:
+        "200":
+          description: The process is accepting work.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: The process is draining and does not accept new work.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition, version 0.0.4. No `X-Tenant-ID` is required.
+        The scrape stays available while the process is draining, after
+        `GET /healthz` has started answering 503.
+
+        A storage call cancelled because the process is stopping is omitted.
+        It is not a storage failure, and the snapshot stays `creating` or
+        `deleting`.
+
+        `snapshot_queue_depth` (gauge)
+        Jobs waiting in the worker queue. A job inside a storage call has
+        already left the queue, and backoff does not occupy a concurrency slot.
+
+        `snapshot_storage_duration_seconds` (summary)
+        Duration of one storage call, in seconds, excluding exponential backoff.
+        Published as `_count` and `_sum`.
+        Labels: `op` is `create` or `delete`; `result` is `success` or `error`.
+
+        `snapshot_storage_errors_total` (counter)
+        Storage calls that returned an error, including timeouts that count as
+        a failed attempt. Label: `op` (`create` or `delete`).
+      responses:
+        "200":
+          description: Current Prometheus exposition.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/MetricsText"
+              example: |
+                # HELP snapshot_queue_depth Jobs waiting in the worker queue.
+                # TYPE snapshot_queue_depth gauge
+                snapshot_queue_depth 2
+                # HELP snapshot_storage_duration_seconds Duration of one storage call, excluding backoff.
+                # TYPE snapshot_storage_duration_seconds summary
+                snapshot_storage_duration_seconds_count{op="create",result="success"} 1
+                snapshot_storage_duration_seconds_sum{op="create",result="success"} 0.2
+                snapshot_storage_duration_seconds_count{op="delete",result="error"} 1
+                snapshot_storage_duration_seconds_sum{op="delete",result="error"} 0.05
+                # HELP snapshot_storage_errors_total Storage calls that returned an error.
+                # TYPE snapshot_storage_errors_total counter
+                snapshot_storage_errors_total{op="delete"} 1
+  /v1/volumes/{volumeId}/snapshots:
+    post:
+      operationId: createSnapshot
+      summary: Accept a new snapshot
+      parameters:
+        - $ref: "#/components/parameters/VolumeId"
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSnapshotRequest"
+      responses:
+        "202":
+          description: The snapshot was accepted, or an idempotency key replayed an existing one.
+          headers:
+            Idempotency-Replayed:
+              schema:
+                type: string
+                enum: ["true"]
+              description: Present when the Idempotency-Key matched an earlier request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /v1/snapshots:
+    get:
+      operationId: listSnapshots
+      summary: List the tenant's snapshots
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - name: volume_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/SnapshotStatus"
+      responses:
+        "200":
+          description: The tenant's snapshots, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotList"
+        "400":
+          $ref: "#/components/responses/Error"
+  /v1/snapshots/{id}:
+    get:
+      operationId: getSnapshot
+      summary: Fetch one snapshot
+      parameters:
+        - $ref: "#/components/parameters/SnapshotId"
+        - $ref: "#/components/parameters/TenantID"
+      responses:
+        "200":
+          description: The snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteSnapshot
+      summary: Start an asynchronous delete
+      parameters:
+        - $ref: "#/components/parameters/SnapshotId"
+        - $ref: "#/components/parameters/TenantID"
+      responses:
+        "202":
+          description: The delete was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    VolumeId:
+      name: volumeId
+      in: path
+      required: true
+      schema:
+        type: string
+    SnapshotId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    TenantID:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+  responses:
+    Error:
+      description: A request was rejected.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, shutting_down]
+    MetricsText:
+      type: string
+      description: |
+        Prometheus exposition text. The series are `snapshot_queue_depth`,
+        `snapshot_storage_duration_seconds` (`_count` and `_sum`), and
+        `snapshot_storage_errors_total`.
+    CreateSnapshotRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+    SnapshotStatus:
+      type: string
+      enum:
+        - pending
+        - creating
+        - ready
+        - failed
+        - deleting
+        - deleted
+        - error_deleting
+    Snapshot:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - volume_id
+        - name
+        - status
+        - attempts
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        volume_id:
+          type: string
+        name:
+          type: string
+        status:
+          $ref: "#/components/schemas/SnapshotStatus"
+        attempts:
+          type: integer
+          minimum: 0
+        error:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SnapshotList:
+      type: object
+      required: [snapshots]
+      properties:
+        snapshots:
+          type: array
+          items:
+            $ref: "#/components/schemas/Snapshot"
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
