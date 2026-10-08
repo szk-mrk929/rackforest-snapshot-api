@@ -12,6 +12,7 @@ import (
 
 	"rackforest-snapshot-api/src/domain"
 	"rackforest-snapshot-api/src/logger"
+	"rackforest-snapshot-api/src/metrics"
 	"rackforest-snapshot-api/src/store"
 	"rackforest-snapshot-api/src/worker"
 )
@@ -19,11 +20,12 @@ import (
 // Server is the snapshot HTTP API. It implements the generated ServerInterface
 // on the standard ServeMux. Status codes are mapped in writeDomain.
 type Server struct {
-	store store.Store
-	jobs  *worker.Worker
-	quota int
-	log   *slog.Logger
-	now   func() time.Time
+	store   store.Store
+	jobs    *worker.Worker
+	quota   int
+	log     *slog.Logger
+	now     func() time.Time
+	metrics http.Handler
 }
 
 // NewServer binds the store and the worker. quota is the tenant's non-deleted limit.
@@ -46,6 +48,12 @@ func NewServer(st store.Store, jobs *worker.Worker, quota int, log *slog.Logger)
 	}, nil
 }
 
+// SetMetrics serves GET /metrics from h. Without it the route still answers 200
+// with an empty exposition, so a scrape is never a 404.
+func (s *Server) SetMetrics(h http.Handler) {
+	s.metrics = h
+}
+
 // Handler is the standalone router, including request ids on every response.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -55,7 +63,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 // Mount registers the routes on mux. Call it before the process starts listening.
-// GET /healthz is also registered; the process serves that path itself and keeps it 200 while draining.
+// GET /healthz is also registered; the process serves that path itself and answers 503 while draining.
 // GET /docs serves Swagger UI for the OpenAPI document.
 func (s *Server) Mount(mux *http.ServeMux) {
 	HandlerWithOptions(s, s.options(mux))
@@ -73,6 +81,15 @@ func (s *Server) options(mux ServeMux) StdHTTPServerOptions {
 // GetHealth reports the process as up. Draining keeps this 200 at the process edge.
 func (s *Server) GetHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, Health{Status: Ok})
+}
+
+// GetMetrics writes the Prometheus exposition. It does not require a tenant.
+func (s *Server) GetMetrics(w http.ResponseWriter, r *http.Request) {
+	h := s.metrics
+	if h == nil {
+		h = metrics.New().Handler()
+	}
+	h.ServeHTTP(w, r)
 }
 
 // CreateSnapshot admits a pending snapshot and returns 202.

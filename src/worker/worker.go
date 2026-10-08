@@ -97,6 +97,14 @@ type Worker struct {
 	flight       sync.WaitGroup
 	shutdownOnce sync.Once
 	shutdownErr  error
+	rec          Recorder
+}
+
+// Recorder receives queue depth and one sample per finished storage call.
+// A nil recorder is ignored. Set it before Start.
+type Recorder interface {
+	SetQueueDepth(n int)
+	ObserveOperation(op string, d time.Duration, failed bool)
 }
 
 // New builds a worker that rejects jobs until Start.
@@ -124,6 +132,13 @@ func New(cfg Config, st store.Store, be backend.StorageBackend, log *slog.Logger
 		active:  make(map[string]struct{}),
 		busy:    make(map[string]struct{}),
 	}, nil
+}
+
+// SetRecorder attaches metrics. Call it before Start.
+func (w *Worker) SetRecorder(rec Recorder) {
+	w.mu.Lock()
+	w.rec = rec
+	w.mu.Unlock()
 }
 
 // Start admits jobs and owns the context later storage calls derive from.
@@ -157,6 +172,40 @@ func (w *Worker) Accepting() bool {
 // deleting before enqueue must leave Attempts at 0 so this series starts at 1.
 // The volume lock key is the volume id alone, shared by every tenant.
 func (w *Worker) Enqueue(ctx context.Context, job Job) error {
+	return w.enqueue(ctx, job, false)
+}
+
+// Recover enqueues snapshots left pending, creating, or deleting.
+// The storage id is the snapshot id, and both storage calls are idempotent,
+// so a create that already landed becomes ready and a delete that already
+// landed becomes deleted. Attempts already stored are kept, so a restart
+// does not grant a fresh budget and a timed-out call is not failed here.
+// Recovery ignores the queue cap: dropping an in-flight snapshot would hide it.
+func (w *Worker) Recover(ctx context.Context) error {
+	snaps, err := w.store.Recoverable(ctx)
+	if err != nil {
+		return err
+	}
+	for _, snap := range snaps {
+		op := OpCreate
+		if snap.Status == domain.StatusDeleting {
+			op = OpDelete
+		}
+		err := w.enqueue(ctx, Job{
+			TenantID:   snap.TenantID,
+			SnapshotID: snap.ID,
+			VolumeID:   snap.VolumeID,
+			Op:         op,
+		}, true)
+		if err != nil {
+			return fmt.Errorf("recover snapshot %s: %w", snap.ID, err)
+		}
+		w.log.InfoContext(ctx, "recovered snapshot", "snapshot_id", snap.ID, "status", snap.Status, "op", op)
+	}
+	return nil
+}
+
+func (w *Worker) enqueue(ctx context.Context, job Job, resume bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -183,7 +232,7 @@ func (w *Worker) Enqueue(ctx context.Context, job Job) error {
 	if snap.VolumeID != job.VolumeID {
 		return fmt.Errorf("%w: volume_id does not match the snapshot", domain.ErrInvalidArgument)
 	}
-	if err := admit(job.Op, snap.Status); err != nil {
+	if err := admit(job.Op, snap.Status); err != nil && !(resume && resumable(job.Op, snap.Status)) {
 		return err
 	}
 
@@ -195,13 +244,24 @@ func (w *Worker) Enqueue(ctx context.Context, job Job) error {
 	if !w.accepting {
 		return domain.ErrShuttingDown
 	}
-	if len(w.queue) >= w.cfg.WorkerQueueSize {
+	if !resume && len(w.queue) >= w.cfg.WorkerQueueSize {
 		return domain.ErrQueueFull
 	}
 	w.queue = append(w.queue, job)
 	w.active[job.key()] = struct{}{}
 	w.kickLocked()
 	return nil
+}
+
+func resumable(op Op, status domain.Status) bool {
+	switch op {
+	case OpCreate:
+		return status == domain.StatusPending || status == domain.StatusCreating
+	case OpDelete:
+		return status == domain.StatusDeleting || status.Deletable()
+	default:
+		return false
+	}
 }
 
 func admit(op Op, status domain.Status) error {
@@ -267,6 +327,7 @@ func (w *Worker) shutdown(ctx context.Context) error {
 // kickLocked starts every leading job whose volume is free.
 // The caller holds w.mu. Jobs past a busy volume stay in order and are skipped.
 func (w *Worker) kickLocked() {
+	defer w.noteQueueLocked()
 	if !w.accepting {
 		return
 	}
@@ -347,7 +408,11 @@ func (w *Worker) attempt(job Job) (again bool, err error) {
 		return false, err
 	}
 
+	started := w.now()
 	callErr := w.invoke(job)
+	if !w.abandoned(callErr) {
+		w.observe(job, w.now().Sub(started), callErr != nil)
+	}
 	if callErr == nil {
 		w.succeed(job)
 		w.log.InfoContext(w.logCtx(job), "snapshot operation finished",
@@ -550,6 +615,21 @@ func (w *Worker) retryContext() context.Context {
 		return context.Background()
 	}
 	return w.retry
+}
+
+func (w *Worker) noteQueueLocked() {
+	if w.rec != nil {
+		w.rec.SetQueueDepth(len(w.queue))
+	}
+}
+
+func (w *Worker) observe(opJob Job, d time.Duration, failed bool) {
+	w.mu.Lock()
+	rec := w.rec
+	w.mu.Unlock()
+	if rec != nil {
+		rec.ObserveOperation(string(opJob.Op), d, failed)
+	}
 }
 
 func (w *Worker) logCtx(job Job) context.Context {

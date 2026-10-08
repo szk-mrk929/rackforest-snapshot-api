@@ -7,12 +7,16 @@ import (
 	"os/signal"
 	"syscall"
 
+	"time"
+
 	"rackforest-snapshot-api/src/api"
 	"rackforest-snapshot-api/src/app"
 	"rackforest-snapshot-api/src/backend"
 	"rackforest-snapshot-api/src/config"
 	"rackforest-snapshot-api/src/logger"
+	"rackforest-snapshot-api/src/metrics"
 	"rackforest-snapshot-api/src/store"
+	pgstore "rackforest-snapshot-api/src/store/postgres"
 	"rackforest-snapshot-api/src/worker"
 )
 
@@ -41,7 +45,14 @@ func main() {
 }
 
 func run(conf config.Config, log *slog.Logger) error {
-	st := store.NewMemory()
+	openCtx, cancelOpen := context.WithTimeout(context.Background(), 15*time.Second)
+	st, closeStore, err := openStore(openCtx, conf)
+	cancelOpen()
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+
 	be := backend.NewMock(backend.MockConfig{
 		MinDelay:  conf.StorageMinDelay,
 		MaxDelay:  conf.StorageMaxDelay,
@@ -57,15 +68,21 @@ func run(conf config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	recorder := metrics.New()
+	jobs.SetRecorder(recorder)
 
 	application, err := app.New(conf, log, jobs)
 	if err != nil {
+		return err
+	}
+	if err := jobs.Recover(context.Background()); err != nil {
 		return err
 	}
 	snapshots, err := api.NewServer(st, jobs, conf.TenantSnapshotQuota, log)
 	if err != nil {
 		return err
 	}
+	snapshots.SetMetrics(recorder.Handler())
 	snapshots.Mount(application.Mux())
 
 	// SIGINT and SIGTERM cancel this context. Run then drains on its own
@@ -73,4 +90,15 @@ func run(conf config.Config, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return application.Run(ctx)
+}
+
+func openStore(ctx context.Context, conf config.Config) (store.Store, func(), error) {
+	if conf.StoreDriver != "postgres" {
+		return store.NewMemory(), func() {}, nil
+	}
+	st, err := pgstore.Open(ctx, conf.DatabaseURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	return st, st.Close, nil
 }

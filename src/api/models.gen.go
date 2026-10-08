@@ -96,6 +96,11 @@ type Health struct {
 // HealthStatus defines model for Health.Status.
 type HealthStatus string
 
+// MetricsText Prometheus exposition text. The series are `snapshot_queue_depth`,
+// `snapshot_storage_duration_seconds` (`_count` and `_sum`), and
+// `snapshot_storage_errors_total`.
+type MetricsText = string
+
 // Snapshot defines model for Snapshot.
 type Snapshot struct {
 	Attempts  int            `json:"attempts"`
@@ -237,6 +242,32 @@ type ClientInterface interface {
 	// Corresponds with GET /healthz (the `GetHealth` operationId).
 	GetHealth(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetMetrics Prometheus metrics
+	//
+	// Prometheus text exposition, version 0.0.4. No `X-Tenant-ID` is required.
+	// The scrape stays available while the process is draining, after
+	// `GET /healthz` has started answering 503.
+	//
+	// A storage call cancelled because the process is stopping is omitted.
+	// It is not a storage failure, and the snapshot stays `creating` or
+	// `deleting`.
+	//
+	// `snapshot_queue_depth` (gauge)
+	// Jobs waiting in the worker queue. A job inside a storage call has
+	// already left the queue, and backoff does not occupy a concurrency slot.
+	//
+	// `snapshot_storage_duration_seconds` (summary)
+	// Duration of one storage call, in seconds, excluding exponential backoff.
+	// Published as `_count` and `_sum`.
+	// Labels: `op` is `create` or `delete`; `result` is `success` or `error`.
+	//
+	// `snapshot_storage_errors_total` (counter)
+	// Storage calls that returned an error, including timeouts that count as
+	// a failed attempt. Label: `op` (`create` or `delete`).
+	//
+	// Corresponds with GET /metrics (the `GetMetrics` operationId).
+	GetMetrics(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListSnapshots List the tenant's snapshots
 	//
 	// Corresponds with GET /v1/snapshots (the `ListSnapshots` operationId).
@@ -272,6 +303,42 @@ type ClientInterface interface {
 // Corresponds with GET /healthz (the `GetHealth` operationId).
 func (c *Client) GetHealth(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetHealthRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetMetrics Prometheus metrics
+//
+// Prometheus text exposition, version 0.0.4. No `X-Tenant-ID` is required.
+// The scrape stays available while the process is draining, after
+// `GET /healthz` has started answering 503.
+//
+// A storage call cancelled because the process is stopping is omitted.
+// It is not a storage failure, and the snapshot stays `creating` or
+// `deleting`.
+//
+// `snapshot_queue_depth` (gauge)
+// Jobs waiting in the worker queue. A job inside a storage call has
+// already left the queue, and backoff does not occupy a concurrency slot.
+//
+// `snapshot_storage_duration_seconds` (summary)
+// Duration of one storage call, in seconds, excluding exponential backoff.
+// Published as `_count` and `_sum`.
+// Labels: `op` is `create` or `delete`; `result` is `success` or `error`.
+//
+// `snapshot_storage_errors_total` (counter)
+// Storage calls that returned an error, including timeouts that count as
+// a failed attempt. Label: `op` (`create` or `delete`).
+//
+// Corresponds with GET /metrics (the `GetMetrics` operationId).
+func (c *Client) GetMetrics(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetMetricsRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -371,6 +438,33 @@ func NewGetHealthRequest(server string) (*http.Request, error) {
 	}
 
 	operationPath := fmt.Sprintf("/healthz")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewGetMetricsRequest constructs an http.Request for the GetMetrics method
+func NewGetMetricsRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/metrics")
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -683,6 +777,34 @@ type ClientWithResponsesInterface interface {
 	// Corresponds with GET /healthz (the `GetHealth` operationId).
 	GetHealthWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetHealthResponse, error)
 
+	// GetMetricsWithResponse Prometheus metrics
+	//
+	// Prometheus text exposition, version 0.0.4. No `X-Tenant-ID` is required.
+	// The scrape stays available while the process is draining, after
+	// `GET /healthz` has started answering 503.
+	//
+	// A storage call cancelled because the process is stopping is omitted.
+	// It is not a storage failure, and the snapshot stays `creating` or
+	// `deleting`.
+	//
+	// `snapshot_queue_depth` (gauge)
+	// Jobs waiting in the worker queue. A job inside a storage call has
+	// already left the queue, and backoff does not occupy a concurrency slot.
+	//
+	// `snapshot_storage_duration_seconds` (summary)
+	// Duration of one storage call, in seconds, excluding exponential backoff.
+	// Published as `_count` and `_sum`.
+	// Labels: `op` is `create` or `delete`; `result` is `success` or `error`.
+	//
+	// `snapshot_storage_errors_total` (counter)
+	// Storage calls that returned an error, including timeouts that count as
+	// a failed attempt. Label: `op` (`create` or `delete`).
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /metrics (the `GetMetrics` operationId).
+	GetMetricsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetMetricsResponse, error)
+
 	// ListSnapshotsWithResponse List the tenant's snapshots
 	//
 	// Returns a wrapper object for the known response body format(s).
@@ -761,6 +883,40 @@ func (r GetHealthResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetHealthResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type GetMetricsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// GetBody returns the raw response body bytes
+func (r GetMetricsResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetMetricsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetMetricsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetMetricsResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -1035,6 +1191,40 @@ func (c *ClientWithResponses) GetHealthWithResponse(ctx context.Context, reqEdit
 	return ParseGetHealthResponse(rsp)
 }
 
+// GetMetricsWithResponse Prometheus metrics
+//
+// Prometheus text exposition, version 0.0.4. No `X-Tenant-ID` is required.
+// The scrape stays available while the process is draining, after
+// `GET /healthz` has started answering 503.
+//
+// A storage call cancelled because the process is stopping is omitted.
+// It is not a storage failure, and the snapshot stays `creating` or
+// `deleting`.
+//
+// `snapshot_queue_depth` (gauge)
+// Jobs waiting in the worker queue. A job inside a storage call has
+// already left the queue, and backoff does not occupy a concurrency slot.
+//
+// `snapshot_storage_duration_seconds` (summary)
+// Duration of one storage call, in seconds, excluding exponential backoff.
+// Published as `_count` and `_sum`.
+// Labels: `op` is `create` or `delete`; `result` is `success` or `error`.
+//
+// `snapshot_storage_errors_total` (counter)
+// Storage calls that returned an error, including timeouts that count as
+// a failed attempt. Label: `op` (`create` or `delete`).
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /metrics (the `GetMetrics` operationId).
+func (c *ClientWithResponses) GetMetricsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetMetricsResponse, error) {
+	rsp, err := c.GetMetrics(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetMetricsResponse(rsp)
+}
+
 // ListSnapshotsWithResponse List the tenant's snapshots
 //
 // Returns a wrapper object for the known response body format(s).
@@ -1128,6 +1318,22 @@ func ParseGetHealthResponse(rsp *http.Response) (*GetHealthResponse, error) {
 		}
 		response.JSON503 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseGetMetricsResponse parses an HTTP response from a GetMetricsWithResponse call
+func ParseGetMetricsResponse(rsp *http.Response) (*GetMetricsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetMetricsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil
@@ -1339,6 +1545,9 @@ type ServerInterface interface {
 	// GetHealth Liveness probe
 	// (GET /healthz)
 	GetHealth(w http.ResponseWriter, r *http.Request)
+	// GetMetrics Prometheus metrics
+	// (GET /metrics)
+	GetMetrics(w http.ResponseWriter, r *http.Request)
 	// ListSnapshots List the tenant's snapshots
 	// (GET /v1/snapshots)
 	ListSnapshots(w http.ResponseWriter, r *http.Request, params ListSnapshotsParams)
@@ -1367,6 +1576,20 @@ func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetHealth(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetMetrics operation middleware
+func (siw *ServerInterfaceWrapper) GetMetrics(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetMetrics(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1749,6 +1972,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	}
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/healthz", wrapper.GetHealth)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/metrics", wrapper.GetMetrics)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/volumes/{volumeId}/snapshots", wrapper.CreateSnapshot)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/snapshots", wrapper.ListSnapshots)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/v1/snapshots/{id}", wrapper.DeleteSnapshot)
@@ -1762,28 +1986,39 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"zFjdb9s2EP9XCG7AXhTbTTtg81u2fixYH4qkGAY0RXARzxYbiVTJU1LP0P8+HKkPy5LTeki7Ppkmj/f1",
-	"uy9qK1NblNagIS+XW1mCgwIJXfh3rrAoLaFJN3/ihne0kUuZISh0MpEGCpTLXbITpkukTzMsgC/QpmQS",
-	"T06btazrRF4aKH1m6Vx1DEugrGenlUykw4+VdqjkklyFD3N8iwYMnT8/qODfJ5Hk5Pz5kaz/snlV4EFV",
-	"79rjY7jWTOxLazwGL79wzjpepNYQGuIllGWuUyBtzfyDt4b3eo4/OlzJpfxh3oM3j6d+HrhdNPyjNIU+",
-	"dbpkZnIpzwSrip7EPXjh8AOmhGoWzG2YsIzfHQJhC9ZFvBJUU0ozK8jfOFuiI81mrCD3mMhyZ2vbeGkr",
-	"C/j0Gs2aMrl8cvpLIgttuv/JhNd7X76LPN53VPaG9ZV1IoeGLrd7srH16nA7tQonQElkgd7DGqfDYFeh",
-	"wKGnH6u2Rx8VmbLgD4ScsrGOnoCqsEJTFczD3spE+qwi0mZ9rey92WF4QM+Gy5TgFtWxaCDCooy1oNBG",
-	"Fyx/0bHQhnCNjnmkIT7UNQQuK+sKXkkFhCekC5TJ2McdJqbKc7jJsU2WEaVWkyC1ATU66F32UG60dl9G",
-	"6jqRFOrC9QFxVamOtjGWhGmOewiFQtdrsHu3MbUzLOmRGbh+oONDUL/WfgJu35yGP5qw+GIXyroTBs7B",
-	"Zhx+HeuH1LochXqJRrGzGjPj0iEo7isr0DmydxTm2JyFZdgM4XXdHU1kCEeWWVmWt1cU/cakmbPGVl50",
-	"qgu7EnfaUQX5SQFppg2KiJGfXZkr8zZDEcEQYJSImogU8pwLK1XOCPDCWxt+KcOOtdBegCo0cem9Mmfi",
-	"3rpbdIIgv/WCbCQm62CNoszBoNAmbN5Aert2tjJqJl7codsIZytCgZ9SLOnKvHrxVsyzUFn+EQ0gUfZO",
-	"FxSxQ87EmYjxJ6zJN8IjeqHZ7ntzZXo3sHEFbERmcyWARGE98UVBGZAAh8JYasxnc2QiSROnt7yA9Pal",
-	"ddxuWszF2ZtzDnZ0Pjr/yWwxW3BU2BINlFou5dPZYvZUJqHdhvBoTeL1GkMocyCHDsntWb5CaurpXns9",
-	"XSwerbk2Eia6KodC6WyK3gdsU0ZDm3UAdsbG/bx4+u31UA60YTVCfFr0AamonTB436rHJbQqCnAbuZSv",
-	"9R0aZlA6e4PhcH73ZD4oFpMYcJG57KiSwTT5btqinmTejXF10gxbHyt0m/1pK5bHB4a26ctdIf0yD++3",
-	"ivr9VwyrQZE+AGrM0592qlPCAHJirbTzFGLs2WJxSFanfJwQR5BzRk+KGeM/32pVxxrKGT+Og+dhv7Xq",
-	"6EDYeSHUyWep+7AZQ3T66BAdgqep/TxSx+xCdTQiTP3sKOpfj6E+PYa6qVbHR9IlgSMB3PF2WmoTKXVy",
-	"sHh/B9Gy+GbR0qbSVw6RATAvkdJMWNNL7zK7mWnm2/Y9Ww+LfWn9BGjDF+LRuHVP66NQ+zzt3keLiHN4",
-	"vf5m1ebRIJ5+H9fDMZhchfX/WJW6cXO3LiXCOk5Q3TtK3OJGOCxz2KDiM/ykfRhfrMGZTJovKvsfhU4u",
-	"mivjgfqNQ4+GxH2GcW7d+0gkCqA0a4SByzW69rvEbNCk23cBu3JypP8PGfQdls2zOJJBGMr8AFaP7q7N",
-	"qcrlcinnsn5f/zsA",
+	"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",
+	"NqYaXbIZm7D15/X/BgA=",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

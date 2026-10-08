@@ -53,8 +53,8 @@ func TestRunShutdownWithBlockedCallLeavesConsistentState(t *testing.T) {
 	cancel()
 	body := waitCode(t, client, base+"/v1/snapshots", http.StatusServiceUnavailable)
 	assertShuttingDown(t, body)
-	health := waitCode(t, client, base+"/healthz", http.StatusOK)
-	assertHealth(t, health)
+	health := waitCode(t, client, base+"/healthz", http.StatusServiceUnavailable)
+	assertDraining(t, health)
 
 	waitNotAccepting(t, jobs)
 	err := jobs.Enqueue(context.Background(), worker.Job{
@@ -115,7 +115,7 @@ func TestShutdownDeadlineLeavesDeleting(t *testing.T) {
 		t.Fatalf("snapshot = %+v, want deleting after one attempt and no error", got)
 	}
 	assertShuttingDown(t, readBody(t, testClient(), ts.URL+"/v1/snapshots", http.StatusServiceUnavailable))
-	assertHealth(t, readBody(t, testClient(), ts.URL+"/healthz", http.StatusOK))
+	assertDraining(t, readBody(t, testClient(), ts.URL+"/healthz", http.StatusServiceUnavailable))
 	if jobs.Accepting() {
 		t.Fatal("worker still accepting")
 	}
@@ -150,7 +150,7 @@ func TestShutdownWaitsForRunningCall(t *testing.T) {
 		t.Fatalf("status = %s, want ready", got.Status)
 	}
 	assertShuttingDown(t, readBody(t, client, ts.URL+"/v1/snapshots", http.StatusServiceUnavailable))
-	assertHealth(t, readBody(t, client, ts.URL+"/healthz", http.StatusOK))
+	assertDraining(t, readBody(t, client, ts.URL+"/healthz", http.StatusServiceUnavailable))
 }
 
 func TestNewRejectsNilWorker(t *testing.T) {
@@ -199,6 +199,7 @@ func testConfig(shutdown time.Duration) config.Config {
 		StorageTimeout:      5 * time.Second,
 		RetryBaseDelay:      time.Second,
 		StorageMaxDelay:     time.Second,
+		StoreDriver:         "memory",
 	}
 }
 
@@ -385,6 +386,19 @@ func assertHealth(t *testing.T, body []byte) {
 		t.Fatal(err)
 	}
 	if got.Status != "ok" {
+		t.Fatalf("health = %#v", got)
+	}
+}
+
+func assertDraining(t *testing.T, body []byte) {
+	t.Helper()
+	var got struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "shutting_down" {
 		t.Fatalf("health = %#v", got)
 	}
 }

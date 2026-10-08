@@ -36,7 +36,7 @@ func (m *Memory) Create(ctx context.Context, snap domain.Snapshot, quota int, id
 	if err := ctx.Err(); err != nil {
 		return domain.Snapshot{}, false, err
 	}
-	if err := validateNew(snap, idempotencyKey); err != nil {
+	if err := ValidateNew(snap, idempotencyKey); err != nil {
 		return domain.Snapshot{}, false, err
 	}
 	snap.CreatedAt = snap.CreatedAt.UTC()
@@ -183,7 +183,24 @@ func (m *Memory) activeCount(tenantID string) int {
 	return n
 }
 
-func validateNew(snap domain.Snapshot, idempotencyKey string) error {
+func (m *Memory) Recoverable(ctx context.Context) ([]domain.Snapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]domain.Snapshot, 0)
+	for _, id := range m.order {
+		snap := m.snaps[id]
+		switch snap.Status {
+		case domain.StatusPending, domain.StatusCreating, domain.StatusDeleting:
+			out = append(out, snap)
+		}
+	}
+	return out, nil
+}
+
+func ValidateNew(snap domain.Snapshot, idempotencyKey string) error {
 	if err := domain.ValidateScopeID("snapshot_id", snap.ID); err != nil {
 		return err
 	}

@@ -33,6 +33,10 @@ type Config struct {
 	StorageMinDelay  time.Duration // Lower bound of the mock delay
 	StorageMaxDelay  time.Duration // Upper bound of the mock delay
 	StorageErrorRate float64       // Mock failure probability, from 0 to 1
+
+	// Persistence. memory is the default. postgres needs DatabaseURL.
+	StoreDriver string
+	DatabaseURL string
 }
 
 func Load() (Config, error) {
@@ -60,6 +64,9 @@ func Load() (Config, error) {
 		StorageMinDelay:  envUtils.Duration("STORAGE_MIN_DELAY", 2*time.Second),
 		StorageMaxDelay:  envUtils.Duration("STORAGE_MAX_DELAY", 10*time.Second),
 		StorageErrorRate: envUtils.Float64("STORAGE_ERROR_RATE", 0.2),
+
+		StoreDriver: envUtils.String("STORE_DRIVER", "memory"),
+		DatabaseURL: envUtils.String("DATABASE_URL", ""),
 	}
 
 	if err := c.Validate(); err != nil {
@@ -99,6 +106,15 @@ func (c Config) Validate() error {
 	}
 	if math.IsNaN(c.StorageErrorRate) || c.StorageErrorRate < 0 || c.StorageErrorRate > 1 {
 		return fmt.Errorf("STORAGE_ERROR_RATE must be between 0 and 1 (%v)", c.StorageErrorRate)
+	}
+	switch c.StoreDriver {
+	case "memory":
+	case "postgres":
+		if c.DatabaseURL == "" {
+			return fmt.Errorf("DATABASE_URL is required when STORE_DRIVER=postgres")
+		}
+	default:
+		return fmt.Errorf("STORE_DRIVER must be memory or postgres (%s)", c.StoreDriver)
 	}
 
 	return nil

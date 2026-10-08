@@ -410,9 +410,27 @@ func TestDocsServesSwaggerUI(t *testing.T) {
 		t.Fatalf("spec = %d %s", spec.code, spec.header.Get("Content-Type"))
 	}
 	body := string(spec.raw)
-	for _, want := range []string{"/healthz", "/v1/snapshots", "/v1/volumes/{volumeId}/snapshots", "RackForest Snapshot API"} {
+	for _, want := range []string{"/healthz", "/metrics", "snapshot_queue_depth", "/v1/snapshots", "/v1/volumes/{volumeId}/snapshots", "RackForest Snapshot API"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("spec missing %q", want)
+		}
+	}
+}
+
+func TestMetricsDoesNotNeedATenant(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	res := h.do(t, http.MethodGet, "/metrics", "", nil, nil)
+	if res.code != http.StatusOK || !strings.Contains(res.header.Get("Content-Type"), "text/plain") {
+		t.Fatalf("metrics = %d %s", res.code, res.header.Get("Content-Type"))
+	}
+	body := string(res.raw)
+	for _, want := range []string{
+		"# TYPE snapshot_queue_depth gauge",
+		"# TYPE snapshot_storage_duration_seconds summary",
+		"# TYPE snapshot_storage_errors_total counter",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in\n%s", want, body)
 		}
 	}
 }

@@ -5,7 +5,8 @@
 // a fresh budget: the signal context is already canceled and must not be the
 // deadline of the storage call still running.
 //
-// Draining rejects every route except GET /healthz with 503. The worker
+// Draining answers GET /healthz with 503 and status shutting_down, and every
+// other route except GET /metrics with the shutting_down error. The worker
 // stops admitting jobs at the same time, so a snapshot still queued stays
 // pending. A storage call already in flight is allowed to finish until the
 // budget runs out. If it does not, the call is canceled and the snapshot
@@ -87,15 +88,23 @@ func (a *App) Addr() string {
 	return addr
 }
 
-// ServeHTTP always serves GET /healthz with 200. Every other request is 503
-// once Shutdown has started, including requests that arrived before the
-// listener closed.
+// ServeHTTP serves GET /healthz with 200 while the process accepts work, and
+// with 503 once Shutdown has started. GET /metrics stays readable during the
+// drain. Every other request then gets the shutting_down error.
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id := logger.ResolveRequestID(r.Header.Get("X-Request-ID"))
 	w.Header().Set("X-Request-ID", id)
 	r = r.WithContext(logger.WithRequestID(r.Context(), id))
 
+	if r.Method == http.MethodGet && r.URL.Path == "/metrics" {
+		a.mux.ServeHTTP(w, r)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
+		if a.draining.Load() {
+			writeJSON(w, http.StatusServiceUnavailable, healthBody{Status: "shutting_down"})
+			return
+		}
 		writeJSON(w, http.StatusOK, healthBody{Status: "ok"})
 		return
 	}
@@ -173,8 +182,8 @@ func (a *App) shutdown(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// The listener stays open while the worker waits, so a probe can still
-	// read /healthz and so business routes can answer 503 instead of reset.
+	// The listener stays open while the worker waits, so a probe can see
+	// /healthz turn 503 and business routes answer 503 instead of reset.
 	a.draining.Store(true)
 	a.log.WithGroup("main").Info("shutting down")
 

@@ -41,4 +41,10 @@ type Store interface {
 	// The API uses it when admission created a row and then the queue refused the job.
 	// Any other status is domain.ErrInvalidState, so a running snapshot cannot disappear.
 	RemovePending(ctx context.Context, tenantID, id string) error
+
+	// Recoverable lists snapshots a restart should enqueue again: pending,
+	// creating, and deleting. The storage call is idempotent for the same id,
+	// so a create that already landed is not cloned and a delete that already
+	// landed is not an error. Results follow insertion order.
+	Recoverable(ctx context.Context) ([]domain.Snapshot, error)
 }

@@ -7,8 +7,8 @@ info:
 
     The create and delete calls return as soon as the snapshot is admitted.
     A worker talks to the storage plane in the background. Every route except
-    GET /healthz requires the X-Tenant-ID header. A tenant only sees its own
-    snapshots and may hold at most ten that are not deleted.
+    GET /healthz and GET /metrics requires the X-Tenant-ID header. A tenant
+    only sees its own snapshots and may hold at most ten that are not deleted.
 servers:
   - url: /
 paths:
@@ -29,6 +29,51 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+  /metrics:
+    get:
+      operationId: getMetrics
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition, version 0.0.4. No `X-Tenant-ID` is required.
+        The scrape stays available while the process is draining, after
+        `GET /healthz` has started answering 503.
+
+        A storage call cancelled because the process is stopping is omitted.
+        It is not a storage failure, and the snapshot stays `creating` or
+        `deleting`.
+
+        `snapshot_queue_depth` (gauge)
+        Jobs waiting in the worker queue. A job inside a storage call has
+        already left the queue, and backoff does not occupy a concurrency slot.
+
+        `snapshot_storage_duration_seconds` (summary)
+        Duration of one storage call, in seconds, excluding exponential backoff.
+        Published as `_count` and `_sum`.
+        Labels: `op` is `create` or `delete`; `result` is `success` or `error`.
+
+        `snapshot_storage_errors_total` (counter)
+        Storage calls that returned an error, including timeouts that count as
+        a failed attempt. Label: `op` (`create` or `delete`).
+      responses:
+        "200":
+          description: Current Prometheus exposition.
+          content:
+            text/plain:
+              schema:
+                $ref: "#/components/schemas/MetricsText"
+              example: |
+                # HELP snapshot_queue_depth Jobs waiting in the worker queue.
+                # TYPE snapshot_queue_depth gauge
+                snapshot_queue_depth 2
+                # HELP snapshot_storage_duration_seconds Duration of one storage call, excluding backoff.
+                # TYPE snapshot_storage_duration_seconds summary
+                snapshot_storage_duration_seconds_count{op="create",result="success"} 1
+                snapshot_storage_duration_seconds_sum{op="create",result="success"} 0.2
+                snapshot_storage_duration_seconds_count{op="delete",result="error"} 1
+                snapshot_storage_duration_seconds_sum{op="delete",result="error"} 0.05
+                # HELP snapshot_storage_errors_total Storage calls that returned an error.
+                # TYPE snapshot_storage_errors_total counter
+                snapshot_storage_errors_total{op="delete"} 1
   /v1/volumes/{volumeId}/snapshots:
     post:
       operationId: createSnapshot
@@ -171,6 +216,12 @@ components:
         status:
           type: string
           enum: [ok, shutting_down]
+    MetricsText:
+      type: string
+      description: |
+        Prometheus exposition text. The series are `snapshot_queue_depth`,
+        `snapshot_storage_duration_seconds` (`_count` and `_sum`), and
+        `snapshot_storage_errors_total`.
     CreateSnapshotRequest:
       type: object
       required: [name]

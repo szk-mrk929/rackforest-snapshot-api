@@ -41,6 +41,9 @@ func TestLoadDefaults(t *testing.T) {
 	if c.StorageErrorRate != 0.2 {
 		t.Errorf("StorageErrorRate = %v", c.StorageErrorRate)
 	}
+	if c.StoreDriver != "memory" || c.DatabaseURL != "" {
+		t.Errorf("store = %s %q", c.StoreDriver, c.DatabaseURL)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -99,6 +102,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "error rate high", key: "STORAGE_ERROR_RATE", val: "1.5", want: "STORAGE_ERROR_RATE"},
 		{name: "error rate low", key: "STORAGE_ERROR_RATE", val: "-0.1", want: "STORAGE_ERROR_RATE"},
 		{name: "negative mock delay", key: "STORAGE_MIN_DELAY", val: "-1", want: "STORAGE_MIN_DELAY"},
+		{name: "store driver", key: "STORE_DRIVER", val: "sqlite", want: "STORE_DRIVER"},
+		{name: "postgres without url", key: "STORE_DRIVER", val: "postgres", want: "DATABASE_URL"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -179,6 +184,8 @@ func clearConfigEnv(t *testing.T) {
 		"STORAGE_MIN_DELAY",
 		"STORAGE_MAX_DELAY",
 		"STORAGE_ERROR_RATE",
+		"STORE_DRIVER",
+		"DATABASE_URL",
 	} {
 		t.Setenv(key, "")
 	}
@@ -198,5 +205,6 @@ func validConfig() Config {
 		StorageMinDelay:     2 * time.Second,
 		StorageMaxDelay:     10 * time.Second,
 		StorageErrorRate:    0.2,
+		StoreDriver:         "memory",
 	}
 }
