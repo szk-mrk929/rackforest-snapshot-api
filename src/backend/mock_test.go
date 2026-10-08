@@ -77,8 +77,8 @@ func TestMockDelayStaysInRange(t *testing.T) {
 	m := NewMock(MockConfig{MinDelay: min, MaxDelay: max, Seed: 7})
 	for i := 0; i < 100; i++ {
 		d := m.nextDelay()
-		if d < min || d >= max {
-			t.Fatalf("delay %s outside [%s, %s)", d, min, max)
+		if d < min || d > max {
+			t.Fatalf("delay %s outside [%s, %s]", d, min, max)
 		}
 	}
 

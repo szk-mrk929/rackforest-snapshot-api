@@ -36,9 +36,11 @@ func (m *Memory) Create(ctx context.Context, snap domain.Snapshot, quota int, id
 	if err := ctx.Err(); err != nil {
 		return domain.Snapshot{}, false, err
 	}
-	if err := validateNew(snap); err != nil {
+	if err := validateNew(snap, idempotencyKey); err != nil {
 		return domain.Snapshot{}, false, err
 	}
+	snap.CreatedAt = snap.CreatedAt.UTC()
+	snap.UpdatedAt = snap.UpdatedAt.UTC()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -47,17 +49,17 @@ func (m *Memory) Create(ctx context.Context, snap domain.Snapshot, quota int, id
 		if id, ok := m.idem[idemRef{tenant: snap.TenantID, key: idempotencyKey}]; ok {
 			existing := m.snaps[id]
 			if existing.VolumeID != snap.VolumeID || existing.Name != snap.Name {
-				return domain.Snapshot{}, false, ErrIdempotencyConflict
+				return domain.Snapshot{}, false, domain.ErrIdempotencyConflict
 			}
 			return existing, false, nil
 		}
 	}
 
 	if m.activeCount(snap.TenantID) >= quota {
-		return domain.Snapshot{}, false, ErrQuotaExceeded
+		return domain.Snapshot{}, false, domain.ErrQuotaExceeded
 	}
 	if _, exists := m.snaps[snap.ID]; exists {
-		return domain.Snapshot{}, false, ErrDuplicate
+		return domain.Snapshot{}, false, fmt.Errorf("%w: duplicate snapshot id", domain.ErrInvalidArgument)
 	}
 
 	m.snaps[snap.ID] = snap
@@ -77,7 +79,7 @@ func (m *Memory) Get(ctx context.Context, tenantID, id string) (domain.Snapshot,
 	defer m.mu.Unlock()
 	snap, ok := m.snaps[id]
 	if !ok || snap.TenantID != tenantID {
-		return domain.Snapshot{}, ErrNotFound
+		return domain.Snapshot{}, domain.ErrNotFound
 	}
 	return snap, nil
 }
@@ -86,6 +88,9 @@ func (m *Memory) Get(ctx context.Context, tenantID, id string) (domain.Snapshot,
 func (m *Memory) List(ctx context.Context, tenantID string, f Filter) ([]domain.Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if f.Status != "" && !f.Status.Valid() {
+		return nil, fmt.Errorf("%w: status %q", domain.ErrInvalidArgument, f.Status)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -107,12 +112,12 @@ func (m *Memory) List(ctx context.Context, tenantID string, f Filter) ([]domain.
 }
 
 // Update implements Store.
-func (m *Memory) Update(ctx context.Context, tenantID, id string, fn func(*domain.Snapshot) error) (domain.Snapshot, error) {
+func (m *Memory) Update(ctx context.Context, tenantID, id string, fn func(domain.Snapshot) (domain.Snapshot, error)) (domain.Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return domain.Snapshot{}, err
 	}
 	if fn == nil {
-		return domain.Snapshot{}, fmt.Errorf("%w: nil update", ErrInvalidSnapshot)
+		return domain.Snapshot{}, fmt.Errorf("%w: nil update", domain.ErrInvalidArgument)
 	}
 
 	m.mu.Lock()
@@ -120,10 +125,10 @@ func (m *Memory) Update(ctx context.Context, tenantID, id string, fn func(*domai
 
 	prev, ok := m.snaps[id]
 	if !ok || prev.TenantID != tenantID {
-		return domain.Snapshot{}, ErrNotFound
+		return domain.Snapshot{}, domain.ErrNotFound
 	}
-	next := prev
-	if err := fn(&next); err != nil {
+	next, err := fn(prev)
+	if err != nil {
 		return domain.Snapshot{}, err
 	}
 	if next.Status != prev.Status && !domain.CanTransition(prev.Status, next.Status) {
@@ -148,12 +153,26 @@ func (m *Memory) activeCount(tenantID string) int {
 	return n
 }
 
-func validateNew(snap domain.Snapshot) error {
-	if snap.ID == "" || snap.TenantID == "" || snap.VolumeID == "" || snap.Name == "" {
-		return fmt.Errorf("%w: id, tenant, volume, and name are required", ErrInvalidSnapshot)
+func validateNew(snap domain.Snapshot, idempotencyKey string) error {
+	if err := domain.ValidateScopeID("snapshot_id", snap.ID); err != nil {
+		return err
+	}
+	if err := domain.ValidateScopeID("tenant_id", snap.TenantID); err != nil {
+		return err
+	}
+	if err := domain.ValidateScopeID("volume_id", snap.VolumeID); err != nil {
+		return err
+	}
+	if err := domain.ValidateName(snap.Name); err != nil {
+		return err
 	}
 	if snap.Status != domain.StatusPending {
-		return fmt.Errorf("%w: new snapshot must be pending", ErrInvalidSnapshot)
+		return fmt.Errorf("%w: new snapshot must be pending", domain.ErrInvalidArgument)
+	}
+	if idempotencyKey != "" {
+		if err := domain.ValidateIdempotencyKey(idempotencyKey); err != nil {
+			return err
+		}
 	}
 	return nil
 }

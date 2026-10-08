@@ -96,7 +96,8 @@ func (m *Mock) nextDelay() time.Duration {
 		return m.minDelay
 	}
 	span := int64(m.maxDelay - m.minDelay)
-	return m.minDelay + time.Duration(m.rng.Int63n(span))
+	// Both bounds are reachable: a configured 2–10s delay can be exactly 10s.
+	return m.minDelay + time.Duration(m.rng.Int63n(span+1))
 }
 
 func (m *Mock) failLocked() bool {

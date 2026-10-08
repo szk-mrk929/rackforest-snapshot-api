@@ -18,13 +18,13 @@ func TestTenantsDoNotSeeEachOther(t *testing.T) {
 		t.Fatalf("create = %+v created=%v err=%v", saved, created, err)
 	}
 
-	if _, err := m.Get(ctx, "tenant-b", "a"); !errors.Is(err, ErrNotFound) {
+	if _, err := m.Get(ctx, "tenant-b", "a"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("other tenant get = %v", err)
 	}
-	if _, err := m.Update(ctx, "tenant-b", "a", func(s *domain.Snapshot) error {
+	if _, err := m.Update(ctx, "tenant-b", "a", func(s domain.Snapshot) (domain.Snapshot, error) {
 		s.Name = "stolen"
-		return nil
-	}); !errors.Is(err, ErrNotFound) {
+		return s, nil
+	}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("other tenant update = %v", err)
 	}
 	got, err := m.Get(ctx, "tenant-a", "a")
@@ -54,8 +54,11 @@ func TestListFiltersVolumeAndStatus(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := m.Update(ctx, "tenant-a", "a", func(s *domain.Snapshot) error {
-		return domain.Transition(s, domain.StatusCreating, s.UpdatedAt.Add(time.Second))
+	if _, err := m.Update(ctx, "tenant-a", "a", func(s domain.Snapshot) (domain.Snapshot, error) {
+		if err := domain.Transition(&s, domain.StatusCreating, s.UpdatedAt.Add(time.Second)); err != nil {
+			return domain.Snapshot{}, err
+		}
+		return s, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +86,7 @@ func TestEleventhNonDeletedSnapshotDoesNotFit(t *testing.T) {
 			t.Fatalf("create %s: %v", id, err)
 		}
 	}
-	if _, _, err := m.Create(ctx, pending("k", "tenant-a", "vol", "k"), 10, ""); !errors.Is(err, ErrQuotaExceeded) {
+	if _, _, err := m.Create(ctx, pending("k", "tenant-a", "vol", "k"), 10, ""); !errors.Is(err, domain.ErrQuotaExceeded) {
 		t.Fatalf("11th err = %v", err)
 	}
 	if _, created, err := m.Create(ctx, pending("other", "tenant-b", "vol", "other"), 10, ""); err != nil || !created {
@@ -97,7 +100,7 @@ func TestDeletedDoesNotCountTowardQuota(t *testing.T) {
 	if _, _, err := m.Create(ctx, pending("a", "tenant-a", "vol", "one"), 1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := m.Create(ctx, pending("b", "tenant-a", "vol", "two"), 1, ""); !errors.Is(err, ErrQuotaExceeded) {
+	if _, _, err := m.Create(ctx, pending("b", "tenant-a", "vol", "two"), 1, ""); !errors.Is(err, domain.ErrQuotaExceeded) {
 		t.Fatalf("second err = %v", err)
 	}
 	if err := walk(m, "tenant-a", "a", domain.StatusCreating, domain.StatusReady, domain.StatusDeleting, domain.StatusDeleted); err != nil {
@@ -127,10 +130,10 @@ func TestIdempotency(t *testing.T) {
 	if err != nil || created || again.ID != first.ID || again.Status != domain.StatusCreating {
 		t.Fatalf("replay = %+v created=%v err=%v", again, created, err)
 	}
-	if _, _, err := m.Create(ctx, pending("c", "tenant-a", "vol-1", "other"), 10, "nightly-1"); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := m.Create(ctx, pending("c", "tenant-a", "vol-1", "other"), 10, "nightly-1"); !errors.Is(err, domain.ErrIdempotencyConflict) {
 		t.Fatalf("name conflict = %v", err)
 	}
-	if _, _, err := m.Create(ctx, pending("d", "tenant-a", "vol-2", "nightly"), 10, "nightly-1"); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := m.Create(ctx, pending("d", "tenant-a", "vol-2", "nightly"), 10, "nightly-1"); !errors.Is(err, domain.ErrIdempotencyConflict) {
 		t.Fatalf("volume conflict = %v", err)
 	}
 	if _, created, err := m.Create(ctx, pending("e", "tenant-b", "vol-9", "other"), 10, "nightly-1"); err != nil || !created {
@@ -149,7 +152,7 @@ func TestIdempotentReplayIgnoresQuota(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := m.Create(ctx, pending("b", "tenant-a", "vol", "other"), 1, ""); !errors.Is(err, ErrQuotaExceeded) {
+	if _, _, err := m.Create(ctx, pending("b", "tenant-a", "vol", "other"), 1, ""); !errors.Is(err, domain.ErrQuotaExceeded) {
 		t.Fatalf("quota err = %v", err)
 	}
 	again, created, err := m.Create(ctx, pending("c", "tenant-a", "vol", "nightly"), 1, "k")
@@ -164,14 +167,14 @@ func TestUpdateRejectsIllegalTransition(t *testing.T) {
 	if _, _, err := m.Create(ctx, pending("a", "tenant-a", "vol", "nightly"), 10, ""); err != nil {
 		t.Fatal(err)
 	}
-	_, err := m.Update(ctx, "tenant-a", "a", func(s *domain.Snapshot) error {
+	_, err := m.Update(ctx, "tenant-a", "a", func(s domain.Snapshot) (domain.Snapshot, error) {
 		s.Status = domain.StatusReady
 		s.Attempts = 3
 		s.Error = "skipped"
-		return nil
+		return s, nil
 	})
 	var edge *domain.TransitionError
-	if !errors.As(err, &edge) || !errors.Is(err, domain.ErrInvalidTransition) {
+	if !errors.As(err, &edge) || !errors.Is(err, domain.ErrInvalidState) {
 		t.Fatalf("err = %v", err)
 	}
 	if edge.From != domain.StatusPending || edge.To != domain.StatusReady {
@@ -182,10 +185,13 @@ func TestUpdateRejectsIllegalTransition(t *testing.T) {
 		t.Fatalf("record changed: %+v %v", got, err)
 	}
 
-	updated, err := m.Update(ctx, "tenant-a", "a", func(s *domain.Snapshot) error {
+	updated, err := m.Update(ctx, "tenant-a", "a", func(s domain.Snapshot) (domain.Snapshot, error) {
 		s.Attempts = 1
 		s.Error = "busy"
-		return domain.Transition(s, domain.StatusCreating, s.UpdatedAt.Add(time.Second))
+		if err := domain.Transition(&s, domain.StatusCreating, s.UpdatedAt.Add(time.Second)); err != nil {
+			return domain.Snapshot{}, err
+		}
+		return s, nil
 	})
 	if err != nil || updated.Status != domain.StatusCreating || updated.Attempts != 1 || updated.Error != "busy" {
 		t.Fatalf("legal update = %+v %v", updated, err)
@@ -202,14 +208,14 @@ func TestUpdateKeepsIdentity(t *testing.T) {
 	if _, _, err := m.Create(ctx, snap, 10, ""); err != nil {
 		t.Fatal(err)
 	}
-	got, err := m.Update(ctx, "tenant-a", "a", func(s *domain.Snapshot) error {
+	got, err := m.Update(ctx, "tenant-a", "a", func(s domain.Snapshot) (domain.Snapshot, error) {
 		s.ID = "other"
 		s.TenantID = "tenant-b"
 		s.VolumeID = "vol-9"
 		s.Name = "renamed"
 		s.CreatedAt = createdAt.Add(time.Hour)
 		s.Attempts = 2
-		return nil
+		return s, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +226,7 @@ func TestUpdateKeepsIdentity(t *testing.T) {
 	if got.Attempts != 2 {
 		t.Fatalf("attempts = %d", got.Attempts)
 	}
-	if _, err := m.Get(ctx, "tenant-b", "other"); !errors.Is(err, ErrNotFound) {
+	if _, err := m.Get(ctx, "tenant-b", "other"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("renamed record is visible: %v", err)
 	}
 }
@@ -247,7 +253,7 @@ func TestQuotaIsCountedWithTheInsert(t *testing.T) {
 			switch {
 			case err == nil && created:
 				createdN++
-			case errors.Is(err, ErrQuotaExceeded):
+			case errors.Is(err, domain.ErrQuotaExceeded):
 				quotaN++
 			default:
 				t.Errorf("create err = %v", err)
@@ -266,17 +272,39 @@ func TestCreateRejectsDuplicateAndBadInput(t *testing.T) {
 	if _, _, err := m.Create(ctx, pending("a", "tenant-a", "vol", "one"), 10, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := m.Create(ctx, pending("a", "tenant-b", "vol", "two"), 10, ""); !errors.Is(err, ErrDuplicate) {
+	if _, _, err := m.Create(ctx, pending("a", "tenant-b", "vol", "two"), 10, ""); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("duplicate = %v", err)
 	}
 	blank := pending("", "tenant-a", "vol", "one")
-	if _, _, err := m.Create(ctx, blank, 10, ""); !errors.Is(err, ErrInvalidSnapshot) {
+	if _, _, err := m.Create(ctx, blank, 10, ""); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("blank id = %v", err)
 	}
 	ready := pending("b", "tenant-a", "vol", "two")
 	ready.Status = domain.StatusReady
-	if _, _, err := m.Create(ctx, ready, 10, ""); !errors.Is(err, ErrInvalidSnapshot) {
+	if _, _, err := m.Create(ctx, ready, 10, ""); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("ready create = %v", err)
+	}
+}
+
+func TestCreateRejectsInvalidNameAndKey(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	badName := pending("a", "tenant-a", "vol", "bad\nname")
+	if _, _, err := m.Create(ctx, badName, 10, ""); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("name err = %v", err)
+	}
+	if _, _, err := m.Create(ctx, pending("a", "tenant-a", "vol", "nightly"), 10, "key 1"); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("key err = %v", err)
+	}
+	if _, err := m.Get(ctx, "tenant-a", "a"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("rejected create was stored: %v", err)
+	}
+}
+
+func TestListRejectsUnknownStatus(t *testing.T) {
+	m := NewMemory()
+	if _, err := m.List(context.Background(), "tenant-a", Filter{Status: "done"}); !errors.Is(err, domain.ErrInvalidArgument) {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -308,8 +336,11 @@ func pending(id, tenant, volume, name string) domain.Snapshot {
 func walk(m *Memory, tenant, id string, steps ...domain.Status) error {
 	ctx := context.Background()
 	for i, status := range steps {
-		_, err := m.Update(ctx, tenant, id, func(s *domain.Snapshot) error {
-			return domain.Transition(s, status, s.UpdatedAt.Add(time.Duration(i+1)*time.Second))
+		_, err := m.Update(ctx, tenant, id, func(s domain.Snapshot) (domain.Snapshot, error) {
+			if err := domain.Transition(&s, status, s.UpdatedAt.Add(time.Duration(i+1)*time.Second)); err != nil {
+				return domain.Snapshot{}, err
+			}
+			return s, nil
 		})
 		if err != nil {
 			return err
