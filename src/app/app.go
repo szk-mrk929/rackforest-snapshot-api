@@ -26,6 +26,7 @@ import (
 
 	"rackforest-snapshot-api/src/config"
 	"rackforest-snapshot-api/src/domain"
+	"rackforest-snapshot-api/src/logger"
 	"rackforest-snapshot-api/src/worker"
 )
 
@@ -90,6 +91,10 @@ func (a *App) Addr() string {
 // once Shutdown has started, including requests that arrived before the
 // listener closed.
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	id := logger.ResolveRequestID(r.Header.Get("X-Request-ID"))
+	w.Header().Set("X-Request-ID", id)
+	r = r.WithContext(logger.WithRequestID(r.Context(), id))
+
 	if r.Method == http.MethodGet && r.URL.Path == "/healthz" {
 		writeJSON(w, http.StatusOK, healthBody{Status: "ok"})
 		return

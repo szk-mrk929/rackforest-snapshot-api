@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"rackforest-snapshot-api/src/api"
 	"rackforest-snapshot-api/src/app"
 	"rackforest-snapshot-api/src/backend"
 	"rackforest-snapshot-api/src/config"
@@ -61,6 +62,11 @@ func run(conf config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	snapshots, err := api.NewServer(st, jobs, conf.TenantSnapshotQuota, log)
+	if err != nil {
+		return err
+	}
+	snapshots.Mount(application.Mux())
 
 	// SIGINT and SIGTERM cancel this context. Run then drains on its own
 	// budget, ShutdownTimeout, instead of the already-canceled signal context.

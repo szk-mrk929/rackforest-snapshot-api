@@ -143,6 +143,36 @@ func (m *Memory) Update(ctx context.Context, tenantID, id string, fn func(domain
 	return next, nil
 }
 
+// RemovePending implements Store.
+func (m *Memory) RemovePending(ctx context.Context, tenantID, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snap, ok := m.snaps[id]
+	if !ok || snap.TenantID != tenantID {
+		return domain.ErrNotFound
+	}
+	if snap.Status != domain.StatusPending {
+		return fmt.Errorf("%w: only a pending snapshot can be removed", domain.ErrInvalidState)
+	}
+	delete(m.snaps, id)
+	order := m.order[:0]
+	for _, existing := range m.order {
+		if existing != id {
+			order = append(order, existing)
+		}
+	}
+	m.order = order
+	for ref, snapID := range m.idem {
+		if ref.tenant == tenantID && snapID == id {
+			delete(m.idem, ref)
+		}
+	}
+	return nil
+}
+
 func (m *Memory) activeCount(tenantID string) int {
 	n := 0
 	for _, snap := range m.snaps {

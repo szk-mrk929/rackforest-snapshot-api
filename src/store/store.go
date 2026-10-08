@@ -36,4 +36,9 @@ type Store interface {
 	// stored only when the domain allows that edge; otherwise the record is
 	// left unchanged and the error is domain.ErrInvalidState.
 	Update(ctx context.Context, tenantID, id string, fn func(domain.Snapshot) (domain.Snapshot, error)) (domain.Snapshot, error)
+
+	// RemovePending deletes a snapshot that is still pending, and its idempotency key.
+	// The API uses it when admission created a row and then the queue refused the job.
+	// Any other status is domain.ErrInvalidState, so a running snapshot cannot disappear.
+	RemovePending(ctx context.Context, tenantID, id string) error
 }

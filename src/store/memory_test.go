@@ -145,6 +145,30 @@ func TestIdempotency(t *testing.T) {
 	}
 }
 
+func TestRemovePendingDropsTheRowAndTheKey(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	if _, _, err := m.Create(ctx, pending("a", "tenant-a", "vol-1", "nightly"), 10, "key-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RemovePending(ctx, "tenant-a", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Get(ctx, "tenant-a", "a"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("get after remove = %v", err)
+	}
+	again, created, err := m.Create(ctx, pending("b", "tenant-a", "vol-1", "other"), 10, "key-1")
+	if err != nil || !created || again.ID != "b" {
+		t.Fatalf("key after remove = %+v created=%v err=%v", again, created, err)
+	}
+	if err := walk(m, "tenant-a", "b", domain.StatusCreating); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RemovePending(ctx, "tenant-a", "b"); !errors.Is(err, domain.ErrInvalidState) {
+		t.Fatalf("remove creating = %v", err)
+	}
+}
+
 func TestIdempotentReplayIgnoresQuota(t *testing.T) {
 	m := NewMemory()
 	ctx := context.Background()
