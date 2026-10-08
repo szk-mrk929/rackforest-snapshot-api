@@ -46,7 +46,22 @@ func New(level slog.Level, w io.Writer) *slog.Logger {
 }
 
 func (h contextHandler) Handle(ctx context.Context, record slog.Record) error {
+	if id := RequestID(ctx); id != "" && !recordHasKey(record, "request_id") {
+		record.AddAttrs(slog.String("request_id", id))
+	}
 	return h.Handler.Handle(ctx, record)
+}
+
+func recordHasKey(record slog.Record, key string) bool {
+	found := false
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == key {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func (h contextHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
