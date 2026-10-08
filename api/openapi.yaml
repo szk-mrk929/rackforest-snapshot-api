@@ -1,0 +1,246 @@
+openapi: 3.0.3
+info:
+  title: RackForest Snapshot API
+  version: 1.0.0
+  description: |
+    Asynchronous snapshots of virtual-machine volumes.
+
+    The create and delete calls return as soon as the snapshot is admitted.
+    A worker talks to the storage plane in the background. Every route except
+    GET /healthz requires the X-Tenant-ID header. A tenant only sees its own
+    snapshots and may hold at most ten that are not deleted.
+servers:
+  - url: /
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      responses:
+        "200":
+          description: The process is accepting work.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          description: The process is draining and does not accept new work.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/volumes/{volumeId}/snapshots:
+    post:
+      operationId: createSnapshot
+      summary: Accept a new snapshot
+      parameters:
+        - $ref: "#/components/parameters/VolumeId"
+        - $ref: "#/components/parameters/TenantID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSnapshotRequest"
+      responses:
+        "202":
+          description: The snapshot was accepted, or an idempotency key replayed an existing one.
+          headers:
+            Idempotency-Replayed:
+              schema:
+                type: string
+                enum: ["true"]
+              description: Present when the Idempotency-Key matched an earlier request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+  /v1/snapshots:
+    get:
+      operationId: listSnapshots
+      summary: List the tenant's snapshots
+      parameters:
+        - $ref: "#/components/parameters/TenantID"
+        - name: volume_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/SnapshotStatus"
+      responses:
+        "200":
+          description: The tenant's snapshots, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotList"
+        "400":
+          $ref: "#/components/responses/Error"
+  /v1/snapshots/{id}:
+    get:
+      operationId: getSnapshot
+      summary: Fetch one snapshot
+      parameters:
+        - $ref: "#/components/parameters/SnapshotId"
+        - $ref: "#/components/parameters/TenantID"
+      responses:
+        "200":
+          description: The snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteSnapshot
+      summary: Start an asynchronous delete
+      parameters:
+        - $ref: "#/components/parameters/SnapshotId"
+        - $ref: "#/components/parameters/TenantID"
+      responses:
+        "202":
+          description: The delete was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Snapshot"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+components:
+  parameters:
+    VolumeId:
+      name: volumeId
+      in: path
+      required: true
+      schema:
+        type: string
+    SnapshotId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+    TenantID:
+      name: X-Tenant-ID
+      in: header
+      required: true
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+  responses:
+    Error:
+      description: A request was rejected.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, shutting_down]
+    CreateSnapshotRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+    SnapshotStatus:
+      type: string
+      enum:
+        - pending
+        - creating
+        - ready
+        - failed
+        - deleting
+        - deleted
+        - error_deleting
+    Snapshot:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - volume_id
+        - name
+        - status
+        - attempts
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        volume_id:
+          type: string
+        name:
+          type: string
+        status:
+          $ref: "#/components/schemas/SnapshotStatus"
+        attempts:
+          type: integer
+          minimum: 0
+        error:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SnapshotList:
+      type: object
+      required: [snapshots]
+      properties:
+        snapshots:
+          type: array
+          items:
+            $ref: "#/components/schemas/Snapshot"
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
