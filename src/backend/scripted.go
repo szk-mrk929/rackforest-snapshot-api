@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"rackforest-snapshot-api/src/logger"
 	"rackforest-snapshot-api/src/utils/ctxutil"
 )
 
@@ -24,6 +25,7 @@ type Scripted struct {
 	maxVol      int
 	creates     int
 	deletes     int
+	requestIDs  []string
 }
 
 // NewScripted returns a backend that succeeds immediately.
@@ -95,6 +97,16 @@ func (s *Scripted) DeleteCalls() int {
 	return s.deletes
 }
 
+// RequestIDs are the ids seen on each call, in start order, including calls still waiting.
+// An empty id means the caller did not put one on the context.
+func (s *Scripted) RequestIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.requestIDs))
+	copy(out, s.requestIDs)
+	return out
+}
+
 // CreateSnapshot implements StorageBackend.
 func (s *Scripted) CreateSnapshot(ctx context.Context, volumeID, snapshotID string) error {
 	return s.call(ctx, volumeID, true)
@@ -120,6 +132,7 @@ func (s *Scripted) call(ctx context.Context, volumeID string, create bool) error
 	} else {
 		s.deletes++
 	}
+	s.requestIDs = append(s.requestIDs, logger.RequestID(ctx))
 	delay := s.delay
 	gate := s.gate
 	s.mu.Unlock()

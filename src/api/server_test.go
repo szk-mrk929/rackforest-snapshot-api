@@ -35,8 +35,22 @@ func TestHealthDoesNotNeedATenant(t *testing.T) {
 
 func TestMissingTenantIsBadRequest(t *testing.T) {
 	h := newHarness(t, harnessOpts{})
-	res := h.do(t, http.MethodPost, "/v1/volumes/vol-1/snapshots", "", []byte(`{"name":"nightly"}`), nil)
-	assertError(t, res, http.StatusBadRequest, "missing_tenant")
+	created := h.create(t, "tenant-a", "vol-1", "nightly", "")
+	if created.code != http.StatusAccepted {
+		t.Fatalf("create = %d %s", created.code, created.raw)
+	}
+
+	post := h.do(t, http.MethodPost, "/v1/volumes/vol-1/snapshots", "", []byte(`{"name":"nightly"}`), map[string]string{"X-Request-ID": "req-missing"})
+	assertError(t, post, http.StatusBadRequest, "missing_tenant")
+	if post.header.Get("X-Request-ID") != "req-missing" {
+		t.Fatalf("request id = %q", post.header.Get("X-Request-ID"))
+	}
+	list := h.do(t, http.MethodGet, "/v1/snapshots", "", nil, nil)
+	assertError(t, list, http.StatusBadRequest, "missing_tenant")
+	got := h.do(t, http.MethodGet, "/v1/snapshots/"+created.snap.Id, "", nil, nil)
+	assertError(t, got, http.StatusBadRequest, "missing_tenant")
+	del := h.do(t, http.MethodDelete, "/v1/snapshots/"+created.snap.Id, "", nil, nil)
+	assertError(t, del, http.StatusBadRequest, "missing_tenant")
 }
 
 func TestCreateListGetAndIdempotency(t *testing.T) {
@@ -46,7 +60,7 @@ func TestCreateListGetAndIdempotency(t *testing.T) {
 	if first.code != http.StatusAccepted {
 		t.Fatalf("create = %d %s", first.code, first.raw)
 	}
-	if first.snap.Status != Pending || first.snap.Name != "nightly" || first.snap.VolumeId != "vol-1" || first.snap.TenantId != "tenant-a" {
+	if first.snap.Status != Pending || first.snap.Name != "nightly" || first.snap.VolumeId != "vol-1" || first.snap.TenantId != "tenant-a" || first.snap.Id == "" || first.snap.Attempts != 0 || first.snap.Error != nil || first.snap.CreatedAt.IsZero() || first.snap.UpdatedAt.IsZero() {
 		t.Fatalf("accepted = %+v", first.snap)
 	}
 	if first.header.Get("Idempotency-Replayed") != "" {
@@ -61,7 +75,7 @@ func TestCreateListGetAndIdempotency(t *testing.T) {
 	if replay.header.Get("Idempotency-Replayed") != "true" {
 		t.Fatalf("replay header = %q", replay.header.Get("Idempotency-Replayed"))
 	}
-	if replay.snap.Id != first.snap.Id || replay.snap.Status != Ready {
+	if replay.snap.Id != first.snap.Id || replay.snap.Status != Ready || replay.snap.Attempts != 1 || replay.snap.Error != nil {
 		t.Fatalf("replay = %+v", replay.snap)
 	}
 
@@ -153,6 +167,171 @@ func TestDeleteRejectsInProgressCreate(t *testing.T) {
 	assertError(t, res, http.StatusConflict, "invalid_state")
 	releaseGate(gate)
 	waitStatus(t, h, "tenant-a", created.snap.Id, Ready)
+}
+
+func TestDeleteWhilePendingIsRejected(t *testing.T) {
+	h := newHarness(t, harnessOpts{workers: 1})
+	gate := make(chan struct{})
+	h.be.SetGate(gate)
+	t.Cleanup(func() { releaseGate(gate) })
+
+	first := h.create(t, "tenant-a", "vol-1", "one", "")
+	if first.code != http.StatusAccepted {
+		t.Fatalf("create = %d %s", first.code, first.raw)
+	}
+	waitStatus(t, h, "tenant-a", first.snap.Id, Creating)
+
+	second := h.create(t, "tenant-a", "vol-2", "two", "")
+	if second.code != http.StatusAccepted || second.snap.Status != Pending {
+		t.Fatalf("second = %d %+v", second.code, second.snap)
+	}
+	got := h.do(t, http.MethodGet, "/v1/snapshots/"+second.snap.Id, "tenant-a", nil, nil)
+	if got.code != http.StatusOK || got.snap.Status != Pending || got.snap.Attempts != 0 {
+		t.Fatalf("while the only slot is busy: %d %+v", got.code, got.snap)
+	}
+
+	res := h.do(t, http.MethodDelete, "/v1/snapshots/"+second.snap.Id, "tenant-a", nil, nil)
+	assertError(t, res, http.StatusConflict, "invalid_state")
+	got = h.do(t, http.MethodGet, "/v1/snapshots/"+second.snap.Id, "tenant-a", nil, nil)
+	if got.snap.Status != Pending {
+		t.Fatalf("rejected delete moved the snapshot to %s", got.snap.Status)
+	}
+
+	releaseGate(gate)
+	waitStatus(t, h, "tenant-a", first.snap.Id, Ready)
+	waitStatus(t, h, "tenant-a", second.snap.Id, Ready)
+}
+
+func TestDeleteOfAnotherTenantIsNotFound(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	created := h.create(t, "tenant-a", "vol-1", "nightly", "")
+	if created.code != http.StatusAccepted {
+		t.Fatalf("create = %d %s", created.code, created.raw)
+	}
+	waitStatus(t, h, "tenant-a", created.snap.Id, Ready)
+
+	foreign := h.do(t, http.MethodDelete, "/v1/snapshots/"+created.snap.Id, "tenant-b", nil, nil)
+	assertError(t, foreign, http.StatusNotFound, "not_found")
+	missing := h.do(t, http.MethodDelete, "/v1/snapshots/missing-snap", "tenant-a", nil, nil)
+	assertError(t, missing, http.StatusNotFound, "not_found")
+
+	got := h.do(t, http.MethodGet, "/v1/snapshots/"+created.snap.Id, "tenant-a", nil, nil)
+	if got.code != http.StatusOK || got.snap.Status != Ready {
+		t.Fatalf("owner snapshot = %d %+v", got.code, got.snap)
+	}
+	listed := h.do(t, http.MethodGet, "/v1/snapshots", "tenant-b", nil, nil)
+	if listed.code != http.StatusOK || len(listed.list.Snapshots) != 0 {
+		t.Fatalf("other tenant list = %d %+v", listed.code, listed.list.Snapshots)
+	}
+}
+
+func TestReplayDoesNotCreateASecondSnapshot(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	gate := make(chan struct{})
+	h.be.SetGate(gate)
+	t.Cleanup(func() { releaseGate(gate) })
+
+	first := h.create(t, "tenant-a", "vol-1", "nightly", "key-1")
+	if first.code != http.StatusAccepted || first.snap.Status != Pending {
+		t.Fatalf("create = %d %+v", first.code, first.snap)
+	}
+	replay := h.create(t, "tenant-a", "vol-1", "nightly", "key-1")
+	if replay.code != http.StatusOK || replay.header.Get("Idempotency-Replayed") != "true" || replay.snap.Id != first.snap.Id {
+		t.Fatalf("replay = %d header %q %+v", replay.code, replay.header.Get("Idempotency-Replayed"), replay.snap)
+	}
+	if replay.snap.Status != Pending && replay.snap.Status != Creating {
+		t.Fatalf("replay status = %s", replay.snap.Status)
+	}
+	if calls := h.be.CreateCalls(); calls > 1 {
+		t.Fatalf("creates while in flight = %d", calls)
+	}
+
+	releaseGate(gate)
+	waitStatus(t, h, "tenant-a", first.snap.Id, Ready)
+	if calls := h.be.CreateCalls(); calls != 1 {
+		t.Fatalf("creates = %d, want 1", calls)
+	}
+	again := h.create(t, "tenant-a", "vol-1", "nightly", "key-1")
+	if again.code != http.StatusOK || again.snap.Id != first.snap.Id || again.snap.Status != Ready || again.header.Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("replay after ready = %d header %q %+v", again.code, again.header.Get("Idempotency-Replayed"), again.snap)
+	}
+	if calls := h.be.CreateCalls(); calls != 1 {
+		t.Fatalf("creates after replay = %d, want 1", calls)
+	}
+}
+
+func TestRequestIDReachesStorage(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	payload := []byte(`{"name":"nightly"}`)
+	kept := h.do(t, http.MethodPost, "/v1/volumes/vol-1/snapshots", "tenant-a", payload, map[string]string{"X-Request-ID": "req-42"})
+	if kept.code != http.StatusAccepted || kept.header.Get("X-Request-ID") != "req-42" {
+		t.Fatalf("create = %d id %q body %s", kept.code, kept.header.Get("X-Request-ID"), kept.raw)
+	}
+	waitStatus(t, h, "tenant-a", kept.snap.Id, Ready)
+	ids := h.be.RequestIDs()
+	if len(ids) != 1 || ids[0] != "req-42" {
+		t.Fatalf("storage request ids = %v", ids)
+	}
+
+	replaced := h.do(t, http.MethodPost, "/v1/volumes/vol-2/snapshots", "tenant-a", []byte(`{"name":"weekly"}`), map[string]string{"X-Request-ID": "bad id"})
+	got := replaced.header.Get("X-Request-ID")
+	if replaced.code != http.StatusAccepted || got == "" || got == "bad id" || strings.ContainsAny(got, " ") {
+		t.Fatalf("create = %d id %q", replaced.code, got)
+	}
+	waitStatus(t, h, "tenant-a", replaced.snap.Id, Ready)
+	ids = h.be.RequestIDs()
+	if len(ids) != 2 || ids[1] != got {
+		t.Fatalf("storage request ids = %v, response id %q", ids, got)
+	}
+}
+
+func TestFailedSnapshotCanBeDeletedAndRetried(t *testing.T) {
+	h := newHarness(t, harnessOpts{quota: 1})
+	h.be.SetFailCreates(3)
+
+	first := h.create(t, "tenant-a", "vol-1", "one", "k1")
+	if first.code != http.StatusAccepted {
+		t.Fatalf("create = %d %s", first.code, first.raw)
+	}
+	waitStatus(t, h, "tenant-a", first.snap.Id, Failed)
+	failed := h.do(t, http.MethodGet, "/v1/snapshots/"+first.snap.Id, "tenant-a", nil, nil)
+	if failed.code != http.StatusOK || failed.snap.Attempts != 3 || failed.snap.Error == nil || !strings.Contains(*failed.snap.Error, backend.ErrCreateFailed.Error()) {
+		t.Fatalf("failed = %d %+v", failed.code, failed.snap)
+	}
+	if failed.snap.CreatedAt.IsZero() || failed.snap.UpdatedAt.Before(failed.snap.CreatedAt) {
+		t.Fatalf("timestamps = %s %s", failed.snap.CreatedAt, failed.snap.UpdatedAt)
+	}
+	second := h.create(t, "tenant-a", "vol-1", "two", "k2")
+	assertError(t, second, http.StatusConflict, "quota_exceeded")
+
+	h.be.SetFailDeletes(3)
+	del := h.do(t, http.MethodDelete, "/v1/snapshots/"+first.snap.Id, "tenant-a", nil, nil)
+	if del.code != http.StatusAccepted || del.snap.Status != Deleting || del.snap.Attempts != 0 || del.snap.Error != nil {
+		t.Fatalf("delete failed snapshot = %d %+v", del.code, del.snap)
+	}
+	waitStatus(t, h, "tenant-a", first.snap.Id, ErrorDeleting)
+	stuck := h.do(t, http.MethodGet, "/v1/snapshots/"+first.snap.Id, "tenant-a", nil, nil)
+	if stuck.snap.Attempts != 3 || stuck.snap.Error == nil || !strings.Contains(*stuck.snap.Error, backend.ErrDeleteFailed.Error()) {
+		t.Fatalf("error_deleting = %+v", stuck.snap)
+	}
+	third := h.create(t, "tenant-a", "vol-1", "three", "k3")
+	assertError(t, third, http.StatusConflict, "quota_exceeded")
+	filtered := h.do(t, http.MethodGet, "/v1/snapshots?status=error_deleting", "tenant-a", nil, nil)
+	if filtered.code != http.StatusOK || len(filtered.list.Snapshots) != 1 || filtered.list.Snapshots[0].Id != first.snap.Id {
+		t.Fatalf("filtered = %d %+v", filtered.code, filtered.list.Snapshots)
+	}
+
+	retry := h.do(t, http.MethodDelete, "/v1/snapshots/"+first.snap.Id, "tenant-a", nil, nil)
+	if retry.code != http.StatusAccepted || retry.snap.Status != Deleting || retry.snap.Attempts != 0 || retry.snap.Error != nil {
+		t.Fatalf("retry delete = %d %+v", retry.code, retry.snap)
+	}
+	waitStatus(t, h, "tenant-a", first.snap.Id, Deleted)
+	fourth := h.create(t, "tenant-a", "vol-1", "four", "k4")
+	if fourth.code != http.StatusAccepted {
+		t.Fatalf("create after delete = %d %s", fourth.code, fourth.raw)
+	}
+	again := h.do(t, http.MethodDelete, "/v1/snapshots/"+first.snap.Id, "tenant-a", nil, nil)
+	assertError(t, again, http.StatusConflict, "invalid_state")
 }
 
 func TestDeleteStaysDeletingUntilStorageFinishes(t *testing.T) {

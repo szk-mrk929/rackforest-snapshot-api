@@ -115,6 +115,28 @@ func TestDeletedDoesNotCountTowardQuota(t *testing.T) {
 	}
 }
 
+func TestFailedAndErrorDeletingStillCountTowardQuota(t *testing.T) {
+	m := NewMemory()
+	ctx := context.Background()
+	if _, _, err := m.Create(ctx, pending("a", "tenant-a", "vol", "one"), 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []domain.Status{domain.StatusCreating, domain.StatusFailed, domain.StatusDeleting, domain.StatusErrorDeleting} {
+		if err := walk(m, "tenant-a", "a", step); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := m.Create(ctx, pending("b", "tenant-a", "vol", "two"), 1, ""); !errors.Is(err, domain.ErrQuotaExceeded) {
+			t.Fatalf("status %s freed the quota: %v", step, err)
+		}
+	}
+	if err := walk(m, "tenant-a", "a", domain.StatusDeleting, domain.StatusDeleted); err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := m.Create(ctx, pending("b", "tenant-a", "vol", "two"), 1, ""); err != nil || !created {
+		t.Fatalf("after delete = created %v err %v", created, err)
+	}
+}
+
 func TestIdempotency(t *testing.T) {
 	m := NewMemory()
 	ctx := context.Background()

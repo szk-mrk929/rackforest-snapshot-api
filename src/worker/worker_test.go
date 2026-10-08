@@ -156,12 +156,98 @@ func TestBackoffIsExponential(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	waitStatus(t, st, "tenant-a", "snap-1", domain.StatusReady)
+	got := waitStatus(t, st, "tenant-a", "snap-1", domain.StatusReady)
+	if got.Attempts != 3 || got.Error != "" {
+		t.Fatalf("after a retry that succeeded: %+v", got)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(slept) != 2 || slept[0] != base || slept[1] != 2*base {
 		t.Fatalf("backoff sequence = %v, want [%s %s]", slept, base, 2*base)
+	}
+	shutdownOK(t, w)
+}
+
+func TestDeleteFailsThenRetrySucceeds(t *testing.T) {
+	st := store.NewMemory()
+	be := backend.NewScripted()
+	be.SetFailDeletes(3)
+	base := 10 * time.Millisecond
+
+	var (
+		mu    sync.Mutex
+		slept []time.Duration
+	)
+	sleep := func(_ context.Context, d time.Duration) error {
+		mu.Lock()
+		slept = append(slept, d)
+		mu.Unlock()
+		return nil
+	}
+	w := newTestWorker(t, st, be, sleep, Config{
+		WorkerCount:     1,
+		WorkerAttempts:  3,
+		WorkerQueueSize: 8,
+		StorageTimeout:  200 * time.Millisecond,
+		RetryBaseDelay:  base,
+	})
+
+	createPending(t, st, "tenant-a", "snap-1", "vol-1", "nightly")
+	if err := w.Enqueue(context.Background(), Job{
+		TenantID:   "tenant-a",
+		SnapshotID: "snap-1",
+		VolumeID:   "vol-1",
+		Op:         OpCreate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, st, "tenant-a", "snap-1", domain.StatusReady)
+
+	if err := w.Enqueue(context.Background(), Job{
+		TenantID:   "tenant-a",
+		SnapshotID: "snap-1",
+		VolumeID:   "vol-1",
+		Op:         OpDelete,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failed := waitStatus(t, st, "tenant-a", "snap-1", domain.StatusErrorDeleting)
+	if failed.Attempts != 3 || !strings.Contains(failed.Error, backend.ErrDeleteFailed.Error()) {
+		t.Fatalf("error_deleting = %+v", failed)
+	}
+	if be.DeleteCalls() != 3 {
+		t.Fatalf("delete calls = %d, want 3", be.DeleteCalls())
+	}
+	mu.Lock()
+	if len(slept) != 2 || slept[0] != base || slept[1] != 2*base {
+		t.Fatalf("delete backoff = %v, want [%s %s]", slept, base, 2*base)
+	}
+	mu.Unlock()
+
+	// The finished job must leave the active set before a new delete is admitted.
+	shutdownOK(t, w)
+	w = newTestWorker(t, st, be, nil, Config{
+		WorkerCount:     1,
+		WorkerAttempts:  3,
+		WorkerQueueSize: 8,
+		StorageTimeout:  200 * time.Millisecond,
+		RetryBaseDelay:  base,
+	})
+	if err := w.Enqueue(context.Background(), Job{
+		TenantID:   "tenant-a",
+		SnapshotID: "snap-1",
+		VolumeID:   "vol-1",
+		Op:         OpDelete,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deleted := waitStatus(t, st, "tenant-a", "snap-1", domain.StatusDeleted)
+	if deleted.Attempts != 1 || deleted.Error != "" {
+		t.Fatalf("retried delete = %+v", deleted)
+	}
+	if be.DeleteCalls() != 4 {
+		t.Fatalf("delete calls = %d, want 4", be.DeleteCalls())
 	}
 	shutdownOK(t, w)
 }
@@ -207,6 +293,203 @@ func TestGlobalLimitAndVolumeLock(t *testing.T) {
 		waitStatus(t, st, j.TenantID, j.SnapshotID, domain.StatusReady)
 	}
 	shutdownOK(t, w)
+}
+
+func TestVolumeLockIsSharedAcrossTenants(t *testing.T) {
+	st := store.NewMemory()
+	be := backend.NewScripted()
+	gate := make(chan struct{})
+	be.SetGate(gate)
+	w := newTestWorker(t, st, be, nil, Config{
+		WorkerCount:     2,
+		WorkerAttempts:  3,
+		WorkerQueueSize: 8,
+		StorageTimeout:  time.Second,
+		RetryBaseDelay:  time.Millisecond,
+	})
+
+	jobs := []Job{
+		{TenantID: "tenant-a", SnapshotID: "snap-a", VolumeID: "vol-shared", Op: OpCreate},
+		{TenantID: "tenant-b", SnapshotID: "snap-b", VolumeID: "vol-shared", Op: OpCreate},
+		{TenantID: "tenant-a", SnapshotID: "snap-c", VolumeID: "vol-other", Op: OpCreate},
+	}
+	for _, j := range jobs {
+		createPending(t, st, j.TenantID, j.SnapshotID, j.VolumeID, "job-"+j.SnapshotID)
+		if err := w.Enqueue(context.Background(), j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	waitInflightAtLeast(t, be, 2)
+	if got := be.MaxInflight(); got > 2 {
+		t.Fatalf("max inflight = %d, want <= 2", got)
+	}
+	if got := be.MaxVolumeInflight(); got != 1 {
+		t.Fatalf("max inflight per volume = %d, want 1", got)
+	}
+	if got := getSnapshot(t, st, "tenant-b", "snap-b"); got.Status != domain.StatusPending || got.Attempts != 0 {
+		t.Fatalf("other tenant on the busy volume = %+v, want pending", got)
+	}
+	if got := getSnapshot(t, st, "tenant-a", "snap-a"); got.Status != domain.StatusCreating {
+		t.Fatalf("first tenant = %s, want creating", got.Status)
+	}
+	if got := getSnapshot(t, st, "tenant-a", "snap-c"); got.Status != domain.StatusCreating {
+		t.Fatalf("other volume = %s, want creating", got.Status)
+	}
+
+	close(gate)
+	for _, j := range jobs {
+		waitStatus(t, st, j.TenantID, j.SnapshotID, domain.StatusReady)
+	}
+	shutdownOK(t, w)
+}
+
+func TestBackoffReleasesTheGlobalSlot(t *testing.T) {
+	st := store.NewMemory()
+	be := backend.NewScripted()
+	be.SetFailCreates(1)
+
+	sleepStarted := make(chan struct{})
+	sleepRelease := make(chan struct{})
+	var once sync.Once
+	sleep := func(ctx context.Context, _ time.Duration) error {
+		var err error
+		once.Do(func() {
+			close(sleepStarted)
+			select {
+			case <-sleepRelease:
+			case <-ctx.Done():
+				err = ctx.Err()
+			}
+		})
+		return err
+	}
+	w := newTestWorker(t, st, be, sleep, Config{
+		WorkerCount:     1,
+		WorkerAttempts:  3,
+		WorkerQueueSize: 8,
+		StorageTimeout:  time.Second,
+		RetryBaseDelay:  time.Millisecond,
+	})
+
+	createPending(t, st, "tenant-a", "snap-a", "vol-a", "first")
+	createPending(t, st, "tenant-a", "snap-b", "vol-b", "second")
+	if err := w.Enqueue(context.Background(), Job{TenantID: "tenant-a", SnapshotID: "snap-a", VolumeID: "vol-a", Op: OpCreate}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sleepStarted:
+	case <-time.After(time.Second):
+		t.Fatal("did not enter backoff")
+	}
+	if err := w.Enqueue(context.Background(), Job{TenantID: "tenant-a", SnapshotID: "snap-b", VolumeID: "vol-b", Op: OpCreate}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitStatus(t, st, "tenant-a", "snap-b", domain.StatusReady)
+	backingOff := getSnapshot(t, st, "tenant-a", "snap-a")
+	if backingOff.Status != domain.StatusCreating || backingOff.Attempts != 1 {
+		t.Fatalf("snapshot in backoff = %+v", backingOff)
+	}
+	if got := be.MaxInflight(); got > 1 {
+		t.Fatalf("max inflight = %d, want <= 1", got)
+	}
+
+	close(sleepRelease)
+	ready := waitStatus(t, st, "tenant-a", "snap-a", domain.StatusReady)
+	if ready.Attempts != 2 || ready.Error != "" {
+		t.Fatalf("after the freed slot: %+v", ready)
+	}
+	shutdownOK(t, w)
+}
+
+func TestShutdownDuringBackoffLeavesCreating(t *testing.T) {
+	st := store.NewMemory()
+	be := backend.NewScripted()
+	be.SetFailCreates(1)
+
+	sleepStarted := make(chan struct{})
+	sleep := func(ctx context.Context, _ time.Duration) error {
+		close(sleepStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	w := newTestWorker(t, st, be, sleep, Config{
+		WorkerCount:     1,
+		WorkerAttempts:  3,
+		WorkerQueueSize: 8,
+		StorageTimeout:  time.Second,
+		RetryBaseDelay:  time.Second,
+	})
+
+	createPending(t, st, "tenant-a", "snap-1", "vol-1", "nightly")
+	if err := w.Enqueue(context.Background(), Job{
+		TenantID:   "tenant-a",
+		SnapshotID: "snap-1",
+		VolumeID:   "vol-1",
+		Op:         OpCreate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sleepStarted:
+	case <-time.After(time.Second):
+		t.Fatal("did not enter backoff")
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := w.Shutdown(stopCtx); err != nil {
+		t.Fatalf("shutdown err = %v", err)
+	}
+
+	got := getSnapshot(t, st, "tenant-a", "snap-1")
+	if got.Status != domain.StatusCreating || got.Attempts != 1 || !strings.Contains(got.Error, backend.ErrCreateFailed.Error()) {
+		t.Fatalf("snapshot = %+v, want creating after the failed attempt", got)
+	}
+}
+
+func TestShutdownWhileWaitingForSlotLeavesPending(t *testing.T) {
+	st := store.NewMemory()
+	be := backend.NewScripted()
+	be.SetGate(make(chan struct{}))
+	w := newTestWorker(t, st, be, nil, Config{
+		WorkerCount:     1,
+		WorkerAttempts:  3,
+		WorkerQueueSize: 8,
+		StorageTimeout:  time.Second,
+		RetryBaseDelay:  time.Millisecond,
+	})
+
+	createPending(t, st, "tenant-a", "snap-running", "vol-1", "running")
+	createPending(t, st, "tenant-a", "snap-waiting", "vol-2", "waiting")
+	if err := w.Enqueue(context.Background(), Job{
+		TenantID: "tenant-a", SnapshotID: "snap-running", VolumeID: "vol-1", Op: OpCreate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, st, "tenant-a", "snap-running", domain.StatusCreating)
+	waitInflightAtLeast(t, be, 1)
+	if err := w.Enqueue(context.Background(), Job{
+		TenantID: "tenant-a", SnapshotID: "snap-waiting", VolumeID: "vol-2", Op: OpCreate,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := w.Shutdown(stopCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown err = %v", err)
+	}
+
+	running := getSnapshot(t, st, "tenant-a", "snap-running")
+	if running.Status != domain.StatusCreating || running.Attempts != 1 || running.Error != "" {
+		t.Fatalf("running = %+v, want creating", running)
+	}
+	waiting := getSnapshot(t, st, "tenant-a", "snap-waiting")
+	if waiting.Status != domain.StatusPending || waiting.Attempts != 0 || waiting.Error != "" {
+		t.Fatalf("waiting for a slot = %+v, want pending", waiting)
+	}
 }
 
 func TestVolumeLockHeldAcrossBackoffAndBusyVolumeSkipped(t *testing.T) {
